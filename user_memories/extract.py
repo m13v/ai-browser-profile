@@ -8,6 +8,7 @@ from user_memories.ingestors.browser_detect import detect_browsers
 from user_memories.ingestors.webdata import ingest_webdata
 from user_memories.ingestors.history import ingest_history
 from user_memories.ingestors.logins import ingest_logins
+from user_memories.ingestors.bookmarks import ingest_bookmarks
 
 log = logging.getLogger(__name__)
 
@@ -34,10 +35,13 @@ def extract_memories(memories_db_path: str = "memories.db",
     # 2. History → tool/service usage
     ingest_history(mem, profiles)
 
-    # 3. Logins → accounts + emails
+    # 3. Bookmarks → interests + tool boosts
+    ingest_bookmarks(mem, profiles)
+
+    # 4. Logins → accounts + emails
     ingest_logins(mem, profiles)
 
-    # 4. IndexedDB → WhatsApp contacts
+    # 5. IndexedDB → WhatsApp contacts
     if not skip_indexeddb:
         try:
             from user_memories.ingestors.indexeddb import ingest_indexeddb
@@ -45,7 +49,7 @@ def extract_memories(memories_db_path: str = "memories.db",
         except ImportError:
             log.warning("ccl_chromium_reader not installed — skipping IndexedDB")
 
-    # 5. Local Storage → LinkedIn connections
+    # 6. Local Storage → LinkedIn connections
     if not skip_localstorage:
         try:
             from user_memories.ingestors.localstorage import ingest_localstorage

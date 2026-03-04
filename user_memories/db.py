@@ -1,15 +1,23 @@
-"""MemoryDB — schema, upsert, search, mark_accessed, stats, profile, text_search."""
+"""MemoryDB — schema, upsert, search, mark_accessed, stats, profile, text_search, semantic_search."""
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
+
+from user_memories.embeddings import (
+    embed_text, embed_batch, setup_embeddings_table, store_embedding, cosine_search,
+    is_available as embeddings_available,
+)
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
-    confidence REAL DEFAULT 0.5,
+    confidence REAL DEFAULT 1.0,
     source TEXT,
     appeared_count INTEGER DEFAULT 0,
     accessed_count INTEGER DEFAULT 0,
@@ -47,21 +55,46 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 """
 
-SINGLE_VALUE_KEYS = {
-    "first_name", "last_name", "full_name", "email", "phone",
-    "company", "street_address", "address_line_2", "city",
-    "state", "zip", "country", "card_holder_name",
+# ── Key Schema ────────────────────────────────────────────────────────
+
+KEY_SCHEMA = {
+    # Identity (single-value: new value supersedes old)
+    "first_name": "single", "last_name": "single", "full_name": "single",
+    "date_of_birth": "single", "gender": "single", "job_title": "single",
+    "card_holder_name": "single",
+    # Multi-value (one per suffix, e.g., account:github.com)
+    "email": "multi", "phone": "multi", "username": "multi", "language": "multi",
+    "street_address": "multi", "address_line_2": "multi",
+    "city": "multi", "state": "multi",
+    "zip": "multi", "country": "multi", "company": "multi",
+    "account": "multi", "tool": "multi", "contact": "multi", "linkedin": "multi", "bookmark": "multi",
+    "product": "multi", "project": "multi", "interest": "multi",
+    "skill": "multi", "location": "multi", "relationship": "multi",
+    "work": "multi", "business": "multi", "activity": "multi",
 }
 
-STALE_DAYS = {
-    "identity": 1095, "address": 730, "payment": 365,
-    "contact": 365, "account": 365, "tool": 180,
-    "social": 365, "communication": 365,
+CANONICAL_TAGS = {
+    "identity", "contact_info", "address", "payment",
+    "account", "tool", "contact", "work",
+    "knowledge", "communication", "social", "finance",
 }
-DEFAULT_STALE_DAYS = 365
 
-TAG_SECTIONS = {
-    "identity": ["first_name", "last_name", "full_name", "email", "phone"],
+TAG_MIGRATION = {
+    "email": "contact_info", "phone": "contact_info",
+    "credential": "account", "dev": "tool", "ai": "tool",
+    "location": "address", "company": "work",
+    "business": "knowledge", "interest": "knowledge",
+    "lifestyle": "knowledge", "product": "knowledge",
+    "project": "knowledge", "skill": "knowledge",
+    "activity": "knowledge", "language": "identity",
+    "relationship": "contact", "real_estate": "knowledge",
+    "spiritual": "knowledge", "autofill": "identity",
+}
+
+# Profile section mapping based on KEY_SCHEMA
+PROFILE_SECTIONS = {
+    "identity": ["first_name", "last_name", "full_name", "email", "phone",
+                  "date_of_birth", "gender", "job_title", "language"],
     "address": ["street_address", "address_line_2", "city", "state", "zip", "country"],
     "payment": ["card_holder_name"],
     "work": ["company"],
@@ -76,11 +109,12 @@ class MemoryDB:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
         self._migrate()
+        self._vec_ready = setup_embeddings_table(self.conn)
 
     # ── Migration ──────────────────────────────────────────────────
 
     def _migrate(self):
-        """Add new columns/tables to existing DBs."""
+        """Add new columns/tables to existing DBs and migrate to v2."""
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(memories)").fetchall()}
         if "superseded_by" not in cols:
             self.conn.execute("ALTER TABLE memories ADD COLUMN superseded_by INTEGER REFERENCES memories(id)")
@@ -93,81 +127,196 @@ class MemoryDB:
         if "reviewed_at" not in cols:
             self.conn.execute("ALTER TABLE memories ADD COLUMN reviewed_at TEXT")
 
+        # v2 migration: normalize confidence, migrate tags
+        version = self.get_meta("schema_version") or "1"
+        if version == "1":
+            self._migrate_v2()
+
+    def _migrate_v2(self):
+        """V2: set all confidence to 1.0, migrate tags to canonical set."""
+        log.info("Migrating to schema v2: normalizing confidence, migrating tags")
+
+        # Set all confidence to 1.0
+        self.conn.execute("UPDATE memories SET confidence = 1.0")
+
+        # Migrate tags
+        for old_tag, new_tag in TAG_MIGRATION.items():
+            # Update existing tags, ignore if the (memory_id, new_tag) combo already exists
+            self.conn.execute("""
+                UPDATE OR IGNORE memory_tags SET tag = ? WHERE tag = ?
+            """, (new_tag, old_tag))
+            # Delete any remaining old tags (dupes that couldn't be updated)
+            self.conn.execute("DELETE FROM memory_tags WHERE tag = ?", (old_tag,))
+
+        self.conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '2')")
+        self.conn.commit()
+        log.info("Schema v2 migration complete")
+
+    # ── Tag Normalization ─────────────────────────────────────────
+
+    def _normalize_tags(self, tags: list[str]) -> list[str]:
+        """Normalize tags via TAG_MIGRATION, deduplicate."""
+        normalized = set()
+        for tag in tags:
+            normalized.add(TAG_MIGRATION.get(tag, tag))
+        return list(normalized)
+
+    def _key_prefix(self, key: str) -> str:
+        """Extract key prefix before ':' delimiter."""
+        return key.split(":")[0] if ":" in key else key
+
     # ── Upsert ─────────────────────────────────────────────────────
 
     def upsert(self, key: str, value: str, tags: list[str],
-               confidence: float = 0.5, source: str = ""):
-        """Insert or update a memory. Handles supersession for single-value keys."""
+               confidence: float = 1.0, source: str = ""):
+        """Insert or update a memory with semantic dedup.
+
+        Decision framework:
+        1. Exact (key, value) match → bump appeared_count, merge source
+        2. Semantic match (cosine >= 0.92, same key prefix) → supersede old
+        3. Same exact key, different value, single-cardinality → supersede old
+        4. Brand new → INSERT
+        """
         if not value or not value.strip():
             return
         value = value.strip()
         now = datetime.now(timezone.utc).isoformat()
         search_text = f"{key}: {value}"
+        tags = self._normalize_tags(tags)
 
+        # Warn on unknown key prefix (soft — doesn't block)
+        prefix = self._key_prefix(key)
+        if prefix not in KEY_SCHEMA and not key.startswith("autofill:") and not key.startswith("address_type_"):
+            log.debug(f"Unknown key prefix: {prefix} (key={key})")
+
+        # 1. Exact (key, value) match
         existing = self.conn.execute(
-            "SELECT id, confidence, source FROM memories WHERE key=? AND value=?",
+            "SELECT id, source, appeared_count FROM memories WHERE key=? AND value=?",
             (key, value),
         ).fetchone()
 
         if existing:
-            mem_id, old_conf, old_source = existing
-            new_conf = old_conf
-            if source and old_source and source not in old_source:
-                new_conf = min(1.0, old_conf + 0.1)
-                source = f"{old_source}, {source}"
+            mem_id, old_source, appeared = existing
+            new_source = old_source or ""
+            if source and source not in (new_source or ""):
+                new_source = f"{new_source}, {source}" if new_source else source
             self.conn.execute(
-                "UPDATE memories SET confidence=?, source=?, search_text=? WHERE id=?",
-                (new_conf, source, search_text, mem_id),
+                "UPDATE memories SET source=?, appeared_count=?, last_appeared_at=?, search_text=?, confidence=1.0 WHERE id=?",
+                (new_source, (appeared or 0) + 1, now, search_text, mem_id),
             )
-        else:
-            # Supersession: for single-value keys, supersede old value if new confidence >= old
-            if key in SINGLE_VALUE_KEYS:
-                old_row = self.conn.execute(
-                    "SELECT id, confidence FROM memories WHERE key=? AND superseded_by IS NULL",
-                    (key,),
-                ).fetchone()
-                if old_row and old_row[1] <= confidence:
-                    # Insert new, then supersede old
-                    cursor = self.conn.execute(
-                        "INSERT INTO memories (key, value, confidence, source, created_at, search_text) VALUES (?, ?, ?, ?, ?, ?)",
-                        (key, value, confidence, source, now, search_text),
-                    )
-                    mem_id = cursor.lastrowid
-                    self.conn.execute(
-                        "UPDATE memories SET superseded_by=?, superseded_at=? WHERE id=?",
-                        (mem_id, now, old_row[0]),
-                    )
-                else:
-                    cursor = self.conn.execute(
-                        "INSERT INTO memories (key, value, confidence, source, created_at, search_text) VALUES (?, ?, ?, ?, ?, ?)",
-                        (key, value, confidence, source, now, search_text),
-                    )
-                    mem_id = cursor.lastrowid
-            else:
-                cursor = self.conn.execute(
-                    "INSERT INTO memories (key, value, confidence, source, created_at, search_text) VALUES (?, ?, ?, ?, ?, ?)",
-                    (key, value, confidence, source, now, search_text),
-                )
-                mem_id = cursor.lastrowid
+            self._ensure_tags(mem_id, tags)
+            self.conn.commit()
+            return mem_id
 
+        # 2. Semantic dedup — check for near-duplicate with same key prefix
+        mem_id = self._try_semantic_supersede(key, value, search_text, tags, source, now)
+        if mem_id:
+            return mem_id
+
+        # 3. Single-cardinality key supersession
+        cardinality = KEY_SCHEMA.get(prefix, "multi")
+        if cardinality == "single":
+            old_row = self.conn.execute(
+                "SELECT id FROM memories WHERE key=? AND superseded_by IS NULL",
+                (key,),
+            ).fetchone()
+            if old_row:
+                mem_id = self._insert_and_supersede(key, value, search_text, tags, source, now, old_row[0])
+                return mem_id
+
+        # 4. Brand new
+        mem_id = self._insert_new(key, value, search_text, tags, source, now)
+        return mem_id
+
+    def _try_semantic_supersede(self, key: str, value: str, search_text: str,
+                                 tags: list[str], source: str, now: str) -> Optional[int]:
+        """Check for semantic near-duplicate. Returns new mem_id if superseded, else None."""
+        if not self._vec_ready:
+            return None
+
+        vec = embed_text(search_text)
+        if vec is None:
+            return None
+
+        prefix = self._key_prefix(key)
+        matches = cosine_search(self.conn, vec, limit=5, threshold=0.92)
+
+        for old_id, similarity in matches:
+            # Check same key prefix and not already superseded
+            old_row = self.conn.execute(
+                "SELECT key, value, superseded_by FROM memories WHERE id=?", (old_id,)
+            ).fetchone()
+            if not old_row or old_row[2] is not None:
+                continue
+            old_prefix = self._key_prefix(old_row[0])
+            if old_prefix != prefix:
+                continue
+            # Same key prefix, high similarity — supersede
+            log.debug(f"Semantic dedup: '{old_row[0]}: {old_row[1][:50]}' → '{key}: {value[:50]}' (sim={similarity:.3f})")
+            return self._insert_and_supersede(key, value, search_text, tags, source, now, old_id)
+
+        return None
+
+    def _insert_new(self, key: str, value: str, search_text: str,
+                    tags: list[str], source: str, now: str) -> int:
+        """Insert a brand new memory."""
+        cursor = self.conn.execute(
+            "INSERT INTO memories (key, value, confidence, source, created_at, search_text, appeared_count, last_appeared_at) "
+            "VALUES (?, ?, 1.0, ?, ?, ?, 1, ?)",
+            (key, value, source, now, search_text, now),
+        )
+        mem_id = cursor.lastrowid
+        self._ensure_tags(mem_id, tags)
+        self._auto_link(mem_id, key, value)
+        self._store_embedding(mem_id, search_text)
+        self.conn.commit()
+        return mem_id
+
+    def _insert_and_supersede(self, key: str, value: str, search_text: str,
+                               tags: list[str], source: str, now: str,
+                               old_id: int) -> int:
+        """Insert new memory and supersede old one."""
+        cursor = self.conn.execute(
+            "INSERT INTO memories (key, value, confidence, source, created_at, search_text, appeared_count, last_appeared_at) "
+            "VALUES (?, ?, 1.0, ?, ?, ?, 1, ?)",
+            (key, value, source, now, search_text, now),
+        )
+        mem_id = cursor.lastrowid
+        self.conn.execute(
+            "UPDATE memories SET superseded_by=?, superseded_at=? WHERE id=?",
+            (mem_id, now, old_id),
+        )
+        self._ensure_tags(mem_id, tags)
+        self._auto_link(mem_id, key, value)
+        self._store_embedding(mem_id, search_text)
+        self.conn.commit()
+        return mem_id
+
+    def _ensure_tags(self, mem_id: int, tags: list[str]):
+        """Ensure all tags exist for a memory."""
         for tag in tags:
             self.conn.execute(
                 "INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?, ?)",
                 (mem_id, tag),
             )
 
-        self._auto_link(mem_id, key, value)
-        return mem_id
+    def _store_embedding(self, mem_id: int, search_text: str):
+        """Compute and store embedding for a memory."""
+        if not self._vec_ready:
+            return
+        vec = embed_text(search_text)
+        if vec:
+            store_embedding(self.conn, mem_id, vec)
 
     # ── Search ─────────────────────────────────────────────────────
 
     def search(self, tags: list[str], limit: int = 20,
                include_superseded: bool = False) -> list[dict]:
-        """Search memories by tags, ranked with staleness decay applied."""
+        """Search memories by tags, ranked by hit_rate then appeared/accessed counts."""
         placeholders = ",".join("?" for _ in tags)
         superseded_filter = "" if include_superseded else "AND m.superseded_by IS NULL"
         rows = self.conn.execute(f"""
-            SELECT DISTINCT m.id, m.key, m.value, m.confidence, m.source,
+            SELECT DISTINCT m.id, m.key, m.value, m.source,
                    m.appeared_count, m.accessed_count,
                    m.last_appeared_at, m.last_accessed_at, m.created_at,
                    CASE WHEN m.appeared_count = 0 THEN 0.0
@@ -176,29 +325,19 @@ class MemoryDB:
             FROM memories m
             JOIN memory_tags t ON m.id = t.memory_id
             WHERE t.tag IN ({placeholders}) {superseded_filter}
-            ORDER BY hit_rate DESC, m.accessed_count DESC, m.confidence DESC
+            ORDER BY hit_rate DESC, m.accessed_count DESC, m.appeared_count DESC
             LIMIT ?
         """, (*tags, limit)).fetchall()
 
-        now_dt = datetime.now(timezone.utc)
-        now = now_dt.isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
-        # Compute effective confidence with staleness decay
         results = []
         for r in rows:
-            mem_id = r[0]
-            raw_conf = r[3]
-            last_seen = r[7] or r[9]  # last_appeared_at or created_at
-            eff_conf = self._apply_decay(mem_id, raw_conf, last_seen, now_dt)
             results.append({
-                "id": mem_id, "key": r[1], "value": r[2],
-                "confidence": raw_conf, "effective_confidence": eff_conf,
-                "source": r[4], "appeared_count": r[5] + 1,
-                "accessed_count": r[6], "hit_rate": r[10],
+                "id": r[0], "key": r[1], "value": r[2],
+                "source": r[3], "appeared_count": r[4] + 1,
+                "accessed_count": r[5], "hit_rate": r[9],
             })
-
-        # Re-sort by effective confidence (preserving hit_rate as primary)
-        results.sort(key=lambda x: (x["hit_rate"], x["effective_confidence"]), reverse=True)
 
         ids = [r["id"] for r in results]
         if ids:
@@ -211,26 +350,37 @@ class MemoryDB:
 
         return results
 
-    def _apply_decay(self, mem_id: int, confidence: float,
-                     last_seen: Optional[str], now_dt: datetime) -> float:
-        """Compute effective confidence with staleness decay."""
-        if not last_seen:
-            return confidence
-        try:
-            seen_dt = datetime.fromisoformat(last_seen)
-        except (ValueError, TypeError):
-            return confidence
-        days_old = (now_dt - seen_dt).total_seconds() / 86400
-        # Get minimum stale_days from this memory's tags
-        tag_rows = self.conn.execute(
-            "SELECT tag FROM memory_tags WHERE memory_id=?", (mem_id,)
-        ).fetchall()
-        stale_days = DEFAULT_STALE_DAYS
-        for (tag,) in tag_rows:
-            if tag in STALE_DAYS:
-                stale_days = min(stale_days, STALE_DAYS[tag])
-        decay = max(0.1, 1.0 - days_old / stale_days)
-        return confidence * decay
+    # ── Semantic Search ────────────────────────────────────────────
+
+    def semantic_search(self, query: str, limit: int = 20,
+                        threshold: float = 0.5) -> list[dict]:
+        """Search memories by semantic similarity. Falls back to text_search if unavailable."""
+        if not self._vec_ready:
+            return self.text_search(query, limit)
+
+        vec = embed_text(query)
+        if vec is None:
+            return self.text_search(query, limit)
+
+        matches = cosine_search(self.conn, vec, limit=limit, threshold=threshold)
+        if not matches:
+            return self.text_search(query, limit)
+
+        results = []
+        for mem_id, similarity in matches:
+            row = self.conn.execute(
+                "SELECT id, key, value, source, appeared_count, accessed_count, superseded_by "
+                "FROM memories WHERE id=?",
+                (mem_id,),
+            ).fetchone()
+            if not row or row[6] is not None:  # skip superseded
+                continue
+            results.append({
+                "id": row[0], "key": row[1], "value": row[2],
+                "source": row[3], "appeared_count": row[4],
+                "accessed_count": row[5], "similarity": similarity,
+            })
+        return results
 
     # ── Text Search ────────────────────────────────────────────────
 
@@ -242,31 +392,70 @@ class MemoryDB:
         conditions = " AND ".join("LOWER(m.search_text) LIKE ?" for _ in words)
         params = [f"%{w}%" for w in words]
         rows = self.conn.execute(f"""
-            SELECT m.id, m.key, m.value, m.confidence, m.source,
+            SELECT m.id, m.key, m.value, m.source,
                    m.appeared_count, m.accessed_count,
-                   m.last_appeared_at, m.last_accessed_at, m.created_at
+                   CASE WHEN m.appeared_count = 0 THEN 0.0
+                        ELSE CAST(m.accessed_count AS REAL) / m.appeared_count
+                   END AS hit_rate
             FROM memories m
             WHERE {conditions} AND m.superseded_by IS NULL
+            ORDER BY hit_rate DESC, m.accessed_count DESC
             LIMIT ?
         """, (*params, limit)).fetchall()
 
-        now_dt = datetime.now(timezone.utc)
         results = []
         for r in rows:
-            raw_conf = r[3]
-            last_seen = r[7] or r[9]
-            eff_conf = self._apply_decay(r[0], raw_conf, last_seen, now_dt)
-            # Score: matched word count + confidence tiebreaker
             st = f"{r[1]}: {r[2]}".lower()
             matched = sum(1 for w in words if w in st)
             results.append({
                 "id": r[0], "key": r[1], "value": r[2],
-                "confidence": raw_conf, "effective_confidence": eff_conf,
-                "source": r[4], "appeared_count": r[5], "accessed_count": r[6],
-                "score": matched + eff_conf,
+                "source": r[3], "appeared_count": r[4], "accessed_count": r[5],
+                "hit_rate": r[6], "score": matched,
             })
-        results.sort(key=lambda x: x["score"], reverse=True)
+        results.sort(key=lambda x: (x["score"], x["hit_rate"]), reverse=True)
         return results
+
+    # ── Backfill Embeddings ────────────────────────────────────────
+
+    def backfill_embeddings(self) -> int:
+        """Compute embeddings for all existing memories. Returns count embedded."""
+        if not self._vec_ready:
+            log.warning("sqlite-vec not available, cannot backfill embeddings")
+            return 0
+
+        rows = self.conn.execute(
+            "SELECT id, key, value FROM memories WHERE superseded_by IS NULL"
+        ).fetchall()
+
+        if not rows:
+            return 0
+
+        # Check which already have embeddings
+        existing_ids = set()
+        try:
+            for (mid,) in self.conn.execute("SELECT memory_id FROM memory_embeddings"):
+                existing_ids.add(mid)
+        except Exception:
+            pass
+
+        to_embed = [(r[0], f"{r[1]}: {r[2]}") for r in rows if r[0] not in existing_ids]
+        if not to_embed:
+            log.info("All memories already have embeddings")
+            return 0
+
+        log.info(f"Backfilling embeddings for {len(to_embed)} memories...")
+        texts = [t[1] for t in to_embed]
+        vectors = embed_batch(texts)
+
+        count = 0
+        for (mem_id, _), vec in zip(to_embed, vectors):
+            if vec is not None:
+                store_embedding(self.conn, mem_id, vec)
+                count += 1
+
+        self.conn.commit()
+        log.info(f"Embedded {count} memories")
+        return count
 
     # ── Contradiction / History ────────────────────────────────────
 
@@ -319,7 +508,6 @@ class MemoryDB:
 
     def _auto_link(self, mem_id: int, key: str, value: str):
         """Deterministic auto-linking on upsert."""
-        # Email → account linking
         if key == "email":
             accounts = self.conn.execute(
                 "SELECT id FROM memories WHERE key LIKE 'account:%' AND value=? AND id!=?",
@@ -328,7 +516,6 @@ class MemoryDB:
             for (aid,) in accounts:
                 self.link(mem_id, aid, "belongs_to")
 
-        # Cross-account same-identity linking
         if key.startswith("account:"):
             same_user = self.conn.execute(
                 "SELECT id FROM memories WHERE key LIKE 'account:%' AND value=? AND id!=?",
@@ -361,10 +548,19 @@ class MemoryDB:
             "SELECT key, value, accessed_count FROM memories WHERE accessed_count > 0 ORDER BY accessed_count DESC LIMIT 10"
         ).fetchall()
         links = self.conn.execute("SELECT COUNT(*) FROM memory_links").fetchone()[0]
+
+        # Count embeddings
+        embedded = 0
+        try:
+            embedded = self.conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0]
+        except Exception:
+            pass
+
         return {
             "total_memories": total,
             "superseded": superseded,
             "links": links,
+            "embedded": embedded,
             "by_tag": {r[0]: r[1] for r in by_tag},
             "top_accessed": [{"key": r[0], "value": r[1], "accessed": r[2]} for r in top_accessed],
         }
@@ -374,16 +570,18 @@ class MemoryDB:
     def profile(self) -> dict:
         """Generate structured user profile from non-superseded memories."""
         rows = self.conn.execute("""
-            SELECT m.id, m.key, m.value, m.confidence
+            SELECT m.id, m.key, m.value,
+                   CASE WHEN m.appeared_count = 0 THEN 0.0
+                        ELSE CAST(m.accessed_count AS REAL) / m.appeared_count
+                   END AS hit_rate
             FROM memories m
             WHERE m.superseded_by IS NULL
-            ORDER BY m.confidence DESC
+            ORDER BY hit_rate DESC, m.accessed_count DESC
         """).fetchall()
 
-        # Build key→values map
         by_key: dict[str, list[tuple]] = {}
-        for mid, key, value, conf in rows:
-            by_key.setdefault(key, []).append((value, conf))
+        for mid, key, value, hit_rate in rows:
+            by_key.setdefault(key, []).append((value, hit_rate))
 
         def pick_single(k):
             vals = by_key.get(k, [])
@@ -398,19 +596,19 @@ class MemoryDB:
             return dict(list(out.items())[:n])
 
         identity = {}
-        for k in TAG_SECTIONS["identity"]:
+        for k in PROFILE_SECTIONS["identity"]:
             v = pick_single(k)
             if v:
                 identity[k] = v
 
         address = {}
-        for k in TAG_SECTIONS["address"]:
+        for k in PROFILE_SECTIONS["address"]:
             v = pick_single(k)
             if v:
                 address[k] = v
 
         payment = {}
-        for k in TAG_SECTIONS["payment"]:
+        for k in PROFILE_SECTIONS["payment"]:
             v = pick_single(k)
             if v:
                 payment[k] = v
@@ -529,7 +727,6 @@ class MemoryDB:
             updates.append("confidence=?")
             params.append(confidence)
         if key is not None or value is not None:
-            # Fetch current key/value to build search_text
             row = self.conn.execute("SELECT key, value FROM memories WHERE id=?", (memory_id,)).fetchone()
             if row:
                 new_key = key if key is not None else row[0]
