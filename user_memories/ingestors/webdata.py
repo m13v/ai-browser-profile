@@ -10,6 +10,7 @@ from typing import Optional
 from user_memories.db import MemoryDB
 from user_memories.ingestors.constants import (
     ADDRESS_TYPE_MAP, AUTOFILL_FIELD_MAP, BROWSER_PATHS,
+    clean_field_name, is_noise_field, infer_tags,
 )
 
 log = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ def _extract_webdata(mem: MemoryDB, browser: str, profile: str, webdata_path: Pa
         conn = sqlite3.connect(f"file:{tmp_db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
 
-        # --- Structured address profiles ---
+        # --- Structured address profiles (all type codes) ---
         use_counts = {}
         try:
             for row in conn.execute("SELECT guid, use_count FROM addresses"):
@@ -51,10 +52,13 @@ def _extract_webdata(mem: MemoryDB, browser: str, profile: str, webdata_path: Pa
         try:
             for row in conn.execute("SELECT guid, type, value FROM address_type_tokens WHERE value != ''"):
                 type_code = row["type"]
-                if type_code not in ADDRESS_TYPE_MAP:
-                    continue
-                key_name, tags = ADDRESS_TYPE_MAP[type_code]
                 use_count = use_counts.get(row["guid"], 0)
+
+                if type_code in ADDRESS_TYPE_MAP:
+                    key_name, tags = ADDRESS_TYPE_MAP[type_code]
+                else:
+                    key_name = f"address_type_{type_code}"
+                    tags = ["address"]
 
                 if use_count > 50:
                     conf = 0.9
@@ -69,14 +73,36 @@ def _extract_webdata(mem: MemoryDB, browser: str, profile: str, webdata_path: Pa
         except sqlite3.OperationalError:
             pass
 
-        # --- Form autofill entries ---
+        # --- Form autofill entries (ALL fields, not just mapped ones) ---
         try:
-            for row in conn.execute("SELECT name, value, count FROM autofill WHERE value != '' ORDER BY count DESC LIMIT 200"):
-                field = row["name"].lower()
-                if field not in AUTOFILL_FIELD_MAP:
-                    continue
-                key_name, tags = AUTOFILL_FIELD_MAP[field]
+            for row in conn.execute("SELECT name, value, count FROM autofill WHERE value != '' ORDER BY count DESC"):
+                raw_field = row["name"]
+                value = row["value"]
                 use_count = row["count"]
+
+                # Skip noise: pure numbers, UUIDs, timestamps, CSS selectors
+                if is_noise_field(raw_field):
+                    continue
+
+                # Skip very low usage (likely accidental fills)
+                if use_count < 2:
+                    continue
+
+                # Skip very long values (likely not user data)
+                if len(value) > 500:
+                    continue
+
+                # Clean the field name
+                cleaned = clean_field_name(raw_field)
+                if not cleaned or len(cleaned) < 2:
+                    continue
+
+                # Try to map to a known normalized key
+                if cleaned in AUTOFILL_FIELD_MAP:
+                    key_name, tags = AUTOFILL_FIELD_MAP[cleaned]
+                else:
+                    key_name = f"autofill:{cleaned}"
+                    tags = infer_tags(cleaned)
 
                 if use_count > 50:
                     conf = 0.8
@@ -85,7 +111,7 @@ def _extract_webdata(mem: MemoryDB, browser: str, profile: str, webdata_path: Pa
                 else:
                     conf = 0.4
 
-                mem.upsert(key_name, row["value"], tags, conf, f"form:{browser}:{profile}")
+                mem.upsert(key_name, value, tags, conf, f"form:{browser}:{profile}")
         except sqlite3.OperationalError:
             pass
 
