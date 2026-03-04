@@ -118,7 +118,10 @@ To refresh from latest browser data:
 
 ```bash
 cd /Users/matthewdi/user-memories
-python extract.py --scan-db ../browser-scanner/scan.db
+source .venv/bin/activate
+python extract.py                                    # full scan
+python extract.py --browsers arc chrome              # specific browsers
+python extract.py --no-indexeddb --no-localstorage   # fast, skip LevelDB
 ```
 
-This reads scan.db and browser Web Data files directly. The memory database preserves `appeared_count` and `accessed_count` across rebuilds via UPSERT logic — rankings are never lost.
+This reads browser files directly (History, Login Data, Web Data, IndexedDB, Local Storage). The memory database preserves `appeared_count` and `accessed_count` across rebuilds via UPSERT logic — rankings are never lost.

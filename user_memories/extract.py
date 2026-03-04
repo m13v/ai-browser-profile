@@ -1,29 +1,56 @@
-"""Orchestrate memory extraction from all sources."""
+"""Orchestrate memory extraction from all browser sources."""
 
 import logging
-from pathlib import Path
 
 from user_memories.db import MemoryDB
-from user_memories.ingestors.browser_scan import ingest_scan_db
+from user_memories.ingestors.browser_detect import detect_browsers
 from user_memories.ingestors.webdata import ingest_webdata
+from user_memories.ingestors.history import ingest_history
+from user_memories.ingestors.logins import ingest_logins
 
 log = logging.getLogger(__name__)
 
 
-def extract_memories(scan_db_path: str = "../browser-scanner/scan.db",
-                     memories_db_path: str = "memories.db") -> MemoryDB:
-    """Build the memories database from scan.db + direct Web Data extraction."""
-    mem = MemoryDB(memories_db_path)
-    log.info("Extracting memories...")
+def extract_memories(memories_db_path: str = "memories.db",
+                     browsers: set[str] | None = None,
+                     skip_indexeddb: bool = False,
+                     skip_localstorage: bool = False) -> MemoryDB:
+    """Build the memories database directly from browser files.
 
-    # 1. Direct Web Data extraction (address profiles, form autofill, credit cards)
+    Args:
+        memories_db_path: Output database path.
+        browsers: Set of browser names to scan (None = all).
+        skip_indexeddb: Skip IndexedDB extraction (requires ccl_chromium_reader).
+        skip_localstorage: Skip Local Storage extraction (requires ccl_chromium_reader).
+    """
+    mem = MemoryDB(memories_db_path)
+    profiles = detect_browsers(allowed=browsers)
+    log.info(f"Extracting memories from {len(profiles)} profiles...")
+
+    # 1. Web Data (autofill, addresses, credit cards) — reads browser files directly
     ingest_webdata(mem)
 
-    # 2. Extract from scan.db (logins, history, indexeddb, local storage)
-    scan_path = Path(scan_db_path)
-    if scan_path.exists():
-        log.info(f"  scan.db: {scan_path}")
-        ingest_scan_db(mem, scan_db_path)
+    # 2. History → tool/service usage
+    ingest_history(mem, profiles)
+
+    # 3. Logins → accounts + emails
+    ingest_logins(mem, profiles)
+
+    # 4. IndexedDB → WhatsApp contacts
+    if not skip_indexeddb:
+        try:
+            from user_memories.ingestors.indexeddb import ingest_indexeddb
+            ingest_indexeddb(mem, profiles)
+        except ImportError:
+            log.warning("ccl_chromium_reader not installed — skipping IndexedDB")
+
+    # 5. Local Storage → LinkedIn connections
+    if not skip_localstorage:
+        try:
+            from user_memories.ingestors.localstorage import ingest_localstorage
+            ingest_localstorage(mem, profiles)
+        except ImportError:
+            log.warning("ccl_chromium_reader not installed — skipping Local Storage")
 
     mem.conn.commit()
     stats = mem.stats()

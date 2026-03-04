@@ -16,13 +16,24 @@ log = logging.getLogger("extract")
 
 def main():
     parser = argparse.ArgumentParser(description="Extract user memories from browser data")
-    parser.add_argument("--scan-db", default="../browser-scanner/scan.db",
-                        help="Path to browser-scanner scan.db (default: ../browser-scanner/scan.db)")
     parser.add_argument("--output", "-o", default="memories.db",
                         help="Output memories database path (default: memories.db)")
+    parser.add_argument("--browsers", nargs="*",
+                        help="Only scan specific browsers (arc, chrome, safari, firefox, brave, edge)")
+    parser.add_argument("--no-indexeddb", action="store_true",
+                        help="Skip IndexedDB extraction (WhatsApp contacts)")
+    parser.add_argument("--no-localstorage", action="store_true",
+                        help="Skip Local Storage extraction (LinkedIn connections)")
     args = parser.parse_args()
 
-    mem = extract_memories(scan_db_path=args.scan_db, memories_db_path=args.output)
+    browsers = set(b.lower() for b in args.browsers) if args.browsers else None
+
+    mem = extract_memories(
+        memories_db_path=args.output,
+        browsers=browsers,
+        skip_indexeddb=args.no_indexeddb,
+        skip_localstorage=args.no_localstorage,
+    )
     stats = mem.stats()
     log.info(f"Done — {stats['total_memories']} memories in {args.output}")
     mem.close()

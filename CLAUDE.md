@@ -6,8 +6,10 @@ Standalone tool that extracts user knowledge (identity, contacts, accounts, addr
 
 ```bash
 cd /Users/matthewdi/user-memories
-python extract.py                                    # uses ../browser-scanner/scan.db
-python extract.py --scan-db /path/to/scan.db         # custom scan.db path
+source .venv/bin/activate
+python extract.py                                    # scan all browsers
+python extract.py --browsers arc chrome              # specific browsers only
+python extract.py --no-indexeddb --no-localstorage   # skip LevelDB (fast)
 python extract.py --output /path/to/memories.db      # custom output path
 ```
 
@@ -15,17 +17,22 @@ python extract.py --output /path/to/memories.db      # custom output path
 
 - `extract.py` — CLI entry point
 - `user_memories/__init__.py` — exports MemoryDB, extract_memories
-- `user_memories/db.py` — MemoryDB class (schema, upsert, search, mark_accessed, stats)
+- `user_memories/db.py` — MemoryDB class (schema, upsert, search, supersession, staleness decay, entity linking, profile)
 - `user_memories/extract.py` — extract_memories() orchestrator
+- `user_memories/ingestors/browser_detect.py` — BrowserProfile, detect_browsers(), copy_db(), domain()
 - `user_memories/ingestors/constants.py` — lookup maps + browser paths (self-contained)
-- `user_memories/ingestors/browser_scan.py` — reads scan.db (logins, visits, whatsapp, linkedin)
-- `user_memories/ingestors/webdata.py` — reads Web Data files directly from browser profiles
+- `user_memories/ingestors/webdata.py` — reads Web Data files directly (autofill, addresses, credit cards)
+- `user_memories/ingestors/history.py` — reads browser History SQLite (tool/service usage)
+- `user_memories/ingestors/logins.py` — reads Login Data SQLite (accounts, emails)
+- `user_memories/ingestors/indexeddb.py` — reads WhatsApp IndexedDB via ccl_chromium_reader (contacts)
+- `user_memories/ingestors/localstorage.py` — reads LinkedIn Local Storage via ccl_chromium_reader (connections)
 
 ## Design
 
-- **No external dependencies** — pure stdlib (sqlite3, json, pathlib, shutil)
-- **File-based contract** — reads `scan.db` (known schema) from browser-scanner, no code imports
+- **Reads browser files directly** — no intermediary scan.db needed
+- **One pip dependency**: `ccl_chromium_reader` (for IndexedDB + Local Storage LevelDB files). Everything else is stdlib.
 - **Ingestors pattern** — each data source is a separate module, easy to add new ones
+- **Self-ranking** — hit_rate = accessed_count / appeared_count, no manual curation
 
 ## Git
 
