@@ -1,6 +1,7 @@
 """Orchestrate memory extraction from all browser sources."""
 
 import logging
+from typing import Optional, Set
 
 from user_memories.db import MemoryDB
 from user_memories.ingestors.browser_detect import detect_browsers
@@ -12,7 +13,7 @@ log = logging.getLogger(__name__)
 
 
 def extract_memories(memories_db_path: str = "memories.db",
-                     browsers: set[str] | None = None,
+                     browsers: Optional[Set[str]] = None,
                      skip_indexeddb: bool = False,
                      skip_localstorage: bool = False) -> MemoryDB:
     """Build the memories database directly from browser files.
