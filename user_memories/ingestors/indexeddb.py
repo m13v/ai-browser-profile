@@ -99,9 +99,9 @@ def ingest_indexeddb(mem: MemoryDB, profiles: list[BrowserProfile]):
                                 tags.append("work")
 
                             if phone:
-                                mem.upsert(f"contact:{name}", phone, tags, 0.7, "whatsapp")
+                                mem.upsert(f"contact:{name}", phone, tags, source="whatsapp")
                             else:
-                                mem.upsert(f"contact:{name}", jid, tags, 0.5, "whatsapp")
+                                mem.upsert(f"contact:{name}", jid, tags, source="whatsapp")
                             total += 1
                         except Exception:
                             continue

@@ -30,14 +30,12 @@ def ingest_logins(mem: MemoryDB, profiles: list[BrowserProfile]):
                 d = domain(row["origin_url"])
                 username = row["username_value"]
                 use_count = row["times_used"] or 0
-                conf = 0.9 if use_count > 20 else 0.7 if use_count > 5 else 0.5
-
                 mem.upsert(f"account:{d}", username,
-                           ["account", "credential"], conf, f"login:{d}")
+                           ["account"], source=f"login:{d}")
 
                 if "@" in username:
-                    mem.upsert("email", username, ["identity", "email", "communication"],
-                               conf, f"login:{d}")
+                    mem.upsert("email", username, ["identity", "contact_info", "communication"],
+                               source=f"login:{d}")
                 total += 1
             conn.close()
         except Exception as e:

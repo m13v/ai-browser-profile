@@ -60,16 +60,7 @@ def _extract_webdata(mem: MemoryDB, browser: str, profile: str, webdata_path: Pa
                     key_name = f"address_type_{type_code}"
                     tags = ["address"]
 
-                if use_count > 50:
-                    conf = 0.9
-                elif use_count > 10:
-                    conf = 0.7
-                elif use_count > 3:
-                    conf = 0.6
-                else:
-                    conf = 0.4
-
-                mem.upsert(key_name, row["value"], tags, conf, source_prefix)
+                mem.upsert(key_name, row["value"], tags, source=source_prefix)
         except sqlite3.OperationalError:
             pass
 
@@ -104,14 +95,7 @@ def _extract_webdata(mem: MemoryDB, browser: str, profile: str, webdata_path: Pa
                     key_name = f"autofill:{cleaned}"
                     tags = infer_tags(cleaned)
 
-                if use_count > 50:
-                    conf = 0.8
-                elif use_count > 10:
-                    conf = 0.6
-                else:
-                    conf = 0.4
-
-                mem.upsert(key_name, value, tags, conf, f"form:{browser}:{profile}")
+                mem.upsert(key_name, value, tags, source=f"form:{browser}:{profile}")
         except sqlite3.OperationalError:
             pass
 
@@ -120,13 +104,13 @@ def _extract_webdata(mem: MemoryDB, browser: str, profile: str, webdata_path: Pa
             for row in conn.execute("SELECT name_on_card, expiration_month, expiration_year, nickname FROM credit_cards"):
                 if row["name_on_card"]:
                     mem.upsert("card_holder_name", row["name_on_card"],
-                               ["payment", "identity"], 0.8, f"card:{browser}:{profile}")
+                               ["payment", "identity"], source=f"card:{browser}:{profile}")
                 if row["expiration_month"] and row["expiration_year"]:
                     mem.upsert("card_expiry", f"{row['expiration_month']:02d}/{row['expiration_year']}",
-                               ["payment"], 0.7, f"card:{browser}:{profile}")
+                               ["payment"], source=f"card:{browser}:{profile}")
                 if row["nickname"]:
                     mem.upsert("card_nickname", row["nickname"],
-                               ["payment"], 0.7, f"card:{browser}:{profile}")
+                               ["payment"], source=f"card:{browser}:{profile}")
         except sqlite3.OperationalError:
             pass
 

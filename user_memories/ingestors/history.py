@@ -106,7 +106,6 @@ def ingest_history(mem: MemoryDB, profiles: list[BrowserProfile]):
         if d not in SERVICE_NAMES:
             continue
         service = SERVICE_NAMES[d]
-        conf = 0.9 if total > 100 else 0.7 if total > 20 else 0.5
         tags = ["account", "tool"]
         if service in ("GitHub", "GitLab", "Vercel", "Netlify", "Supabase", "Firebase", "CodeSandbox"):
             tags.append("work")
@@ -119,6 +118,6 @@ def ingest_history(mem: MemoryDB, profiles: list[BrowserProfile]):
             tags.append("finance")
         elif service in ("ChatGPT", "Claude", "Anthropic Console"):
             tags.append("ai")
-        mem.upsert(f"tool:{service}", str(total), tags, conf, f"history:{d}")
+        mem.upsert(f"tool:{service}", str(total), tags, source=f"history:{d}")
 
     log.info(f"  History: {len(totals)} domains, {sum(1 for d in totals if d in SERVICE_NAMES)} known services")

@@ -53,7 +53,7 @@ def ingest_localstorage(mem: MemoryDB, profiles: list[BrowserProfile]):
                                 continue
                             value_str = title if title else url
                             mem.upsert(f"linkedin:{name}", value_str,
-                                       ["contact", "work", "social"], 0.6, "linkedin")
+                                       ["contact", "work", "social"], source="linkedin")
                             total += 1
                 except Exception:
                     continue
