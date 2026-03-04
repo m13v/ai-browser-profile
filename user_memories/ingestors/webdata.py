@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import logging
 from pathlib import Path
+from typing import Optional
 
 from user_memories.db import MemoryDB
 from user_memories.ingestors.constants import (
@@ -14,7 +15,7 @@ from user_memories.ingestors.constants import (
 log = logging.getLogger(__name__)
 
 
-def _copy_db(src: Path) -> Path | None:
+def _copy_db(src: Path) -> Optional[Path]:
     """Copy a SQLite DB to temp dir to avoid browser locks."""
     if not src.exists():
         return None
