@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.m13v.whatsapp-daily</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/matthewdi/user-memories/.venv/bin/python</string>
+		<string>/Users/matthewdi/user-memories/scripts/whatsapp_daily.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/matthewdi/user-memories</string>
+	<key>StartInterval</key>
+	<integer>86400</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/matthewdi/user-memories/scripts/logs/launchd-whatsapp-stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/matthewdi/user-memories/scripts/logs/launchd-whatsapp-stderr.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+		<key>HOME</key>
+		<string>/Users/matthewdi</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<false/>
+</dict>
+</plist>
