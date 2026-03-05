@@ -1,16 +1,14 @@
 """Notion desktop app ingestor — extracts memories from notion.db SQLite mirror.
 
 Tier 1 (heuristic, no LLM): workspace info, users as contacts, page titles.
-Tier 2 (LLM, optional): reconstructs pages to markdown, sends to Claude for
-structured memory extraction. Guarded by anthropic SDK + ANTHROPIC_API_KEY.
+Tier 2 (LLM via claude -p): handled by run.sh, uses dump_changed_pages() to
+reconstruct pages and pass to a Claude Code session for extraction.
 
-Sync tracking: notion_last_sync_ts in MemoryDB metadata. First run processes
-50 most recent pages via LLM; incremental runs process up to 100 changed pages.
+Sync tracking: notion_last_sync_ts in MemoryDB metadata.
 """
 
 import json
 import logging
-import os
 import shutil
 import sqlite3
 import tempfile
@@ -229,120 +227,56 @@ def _ingest_page_titles(mem: MemoryDB, conn: sqlite3.Connection) -> int:
     return count
 
 
-def _extract_memories_llm(client, page_markdown: str, page_title: str) -> list[dict]:
-    """Send page to Claude Sonnet for structured memory extraction."""
-    prompt = f"""Extract structured memories from this Notion page. Return a JSON array of objects, each with:
-- "key": one of these formats: contact:Name, project:Name, business:Topic, work:Topic, relationship:Name, product:Name, company:Name, activity:Description
-- "value": the extracted information (concise, factual)
-- "tags": array from: contact, work, knowledge, finance, tool
+def dump_changed_pages(mem: MemoryDB, limit: int = 50, min_blocks: int = 5) -> str:
+    """Reconstruct changed Notion pages as markdown for LLM extraction.
 
-Focus on factual, reusable knowledge: people, companies, projects, decisions, relationships, skills, tools.
-Skip trivial content, formatting artifacts, and meeting logistics.
-
-Page title: {page_title}
-
-{page_markdown[:MAX_CHARS_TO_LLM]}"""
+    Returns concatenated markdown of pages changed since last sync,
+    filtered to pages with at least min_blocks child blocks.
+    Used by run.sh to pass content to a claude -p session.
+    """
+    tmp = _copy_notion_db()
+    if not tmp:
+        return ""
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = response.content[0].text
+        conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
 
-        # Extract JSON from response (handle ```json ... ``` wrapping)
-        if "```json" in text:
-            text = text.split("```json", 1)[1].split("```", 1)[0]
-        elif "```" in text:
-            text = text.split("```", 1)[1].split("```", 1)[0]
+        since_ts = float(mem.get_meta("notion_last_sync_ts") or "0")
 
-        memories = json.loads(text.strip())
-        if not isinstance(memories, list):
-            return []
+        rows = conn.execute(
+            "SELECT id, type, properties, last_edited_time FROM block "
+            "WHERE type IN ('page', 'transcription') AND alive = 1 "
+            "AND properties IS NOT NULL AND last_edited_time > ? "
+            "ORDER BY last_edited_time DESC LIMIT ?",
+            (since_ts, limit * 3),  # fetch extra to filter by block count
+        ).fetchall()
 
-        # Validate each memory
-        valid = []
-        for m in memories:
-            if not isinstance(m, dict):
+        pages = []
+        for row in rows:
+            title = _extract_title(row["properties"])
+            if not title or len(title) < 3:
                 continue
-            key = m.get("key", "")
-            value = m.get("value", "")
-            tags = m.get("tags", [])
-            if not key or not value:
+            child_count = conn.execute(
+                "SELECT COUNT(*) FROM block WHERE parent_id = ? AND alive = 1",
+                (row["id"],)
+            ).fetchone()[0]
+            if child_count < min_blocks:
                 continue
-            # Validate key prefix
-            prefix = key.split(":")[0] if ":" in key else ""
-            if prefix not in VALID_PREFIXES:
-                continue
-            # Validate tags
-            tags = [t for t in tags if t in VALID_TAGS]
-            if not tags:
-                tags = ["knowledge"]
-            valid.append({"key": key, "value": value, "tags": tags})
-        return valid
+            page_md = _reconstruct_page(conn, row["id"], title)
+            if len(page_md) > 50:
+                pages.append(page_md[:MAX_CHARS_TO_LLM])
+            if len(pages) >= limit:
+                break
 
-    except Exception as e:
-        log.warning(f"LLM extraction failed for '{page_title}': {e}")
-        return []
+        conn.close()
+        return "\n\n---\n\n".join(pages)
+    finally:
+        shutil.rmtree(tmp.parent, ignore_errors=True)
 
 
-def _ingest_pages_llm(mem: MemoryDB, conn: sqlite3.Connection,
-                      since_ts: float, page_limit: int):
-    """Tier 2: query changed pages, reconstruct, LLM extract, upsert."""
-    try:
-        import anthropic
-    except ImportError:
-        log.warning("anthropic SDK not installed — skipping Tier 2")
-        return
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        log.warning("ANTHROPIC_API_KEY not set — skipping Tier 2")
-        return
-
-    client = anthropic.Anthropic()
-
-    # Query pages changed since high-water mark
-    rows = conn.execute(
-        "SELECT id, type, properties, last_edited_time FROM block "
-        "WHERE type IN ('page', 'transcription') AND alive = 1 "
-        "AND properties IS NOT NULL AND last_edited_time > ? "
-        "ORDER BY last_edited_time DESC LIMIT ?",
-        (since_ts, page_limit),
-    ).fetchall()
-
-    if not rows:
-        log.info("Notion Tier 2: no changed pages to process")
-        return
-
-    log.info(f"Notion Tier 2: processing {len(rows)} changed pages via LLM")
-    total_memories = 0
-
-    for row in rows:
-        title = _extract_title(row["properties"])
-        if not title or len(title) < 3:
-            continue
-
-        page_md = _reconstruct_page(conn, row["id"], title)
-        if len(page_md) < 50:
-            continue
-
-        source = "notion:transcription" if row["type"] == "transcription" else "notion:page"
-        memories = _extract_memories_llm(client, page_md, title)
-
-        for m in memories:
-            mem.upsert(
-                m["key"],
-                m["value"],
-                tags=m["tags"],
-                source=source,
-            )
-            total_memories += 1
-
-    log.info(f"Notion Tier 2: extracted {total_memories} memories from {len(rows)} pages")
-
-
-def ingest_notion(mem: MemoryDB, skip_llm: bool = False):
-    """Main entry point. Copies DB, runs Tier 1 + optional Tier 2, updates high-water mark."""
+def ingest_notion(mem: MemoryDB):
+    """Main entry point. Copies DB, runs Tier 1, updates high-water mark."""
     tmp = _copy_notion_db()
     if not tmp:
         log.warning("Notion DB not found — skipping Notion ingestor")
@@ -351,10 +285,6 @@ def ingest_notion(mem: MemoryDB, skip_llm: bool = False):
     try:
         conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
-
-        # Read high-water mark
-        since_ts = float(mem.get_meta("notion_last_sync_ts") or "0")
-        is_first_run = since_ts == 0
 
         # Get max last_edited_time for new high-water mark
         row = conn.execute(
@@ -370,11 +300,6 @@ def ingest_notion(mem: MemoryDB, skip_llm: bool = False):
             f"Notion Tier 1: {ws_count} workspaces, {user_count} users, "
             f"{title_count} page titles"
         )
-
-        # Tier 2: LLM extraction (optional)
-        if not skip_llm:
-            page_limit = 50 if is_first_run else 100
-            _ingest_pages_llm(mem, conn, since_ts, page_limit)
 
         # Update high-water mark
         if new_ts:

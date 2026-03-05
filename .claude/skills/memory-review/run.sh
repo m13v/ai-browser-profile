@@ -1,7 +1,8 @@
 #!/bin/bash
 # Memory Review — weekly extract + LLM review
-# 1. Run extract.py to ingest new browser data
-# 2. Run Claude to review/clean new entries
+# 1. Run extract.py to ingest new browser data (includes Notion Tier 1)
+# 2. Run Claude to extract memories from changed Notion pages (Tier 2)
+# 3. Run Claude to review/clean new entries
 # Called by launchd weekly (604800s)
 
 set -euo pipefail
@@ -24,6 +25,62 @@ echo "--- Extracting browser data ---" | tee -a "$LOG_FILE"
   source "$VENV"
   python extract.py 2>&1
 ) | tee -a "$LOG_FILE"
+
+# Notion Tier 2: LLM extraction from changed pages
+echo "--- Notion Tier 2: LLM extraction ---" | tee -a "$LOG_FILE"
+NOTION_PAGES=$(cd "$REPO" && source "$VENV" && python -c "
+import sys; sys.path.insert(0, '.')
+from user_memories import MemoryDB
+from user_memories.ingestors.notion import dump_changed_pages
+mem = MemoryDB('memories.db')
+pages = dump_changed_pages(mem, limit=50, min_blocks=5)
+mem.close()
+print(len(pages))
+" 2>/dev/null)
+
+if [ "$NOTION_PAGES" != "0" ] && [ -n "$NOTION_PAGES" ]; then
+  NOTION_DUMP=$(cd "$REPO" && source "$VENV" && python -c "
+import sys; sys.path.insert(0, '.')
+from user_memories import MemoryDB
+from user_memories.ingestors.notion import dump_changed_pages
+mem = MemoryDB('memories.db')
+print(dump_changed_pages(mem, limit=50, min_blocks=5))
+mem.close()
+" 2>/dev/null)
+
+  if [ -n "$NOTION_DUMP" ]; then
+    echo "Found Notion pages to process, starting Claude extraction..." | tee -a "$LOG_FILE"
+    claude -p "You are extracting structured memories from Notion pages.
+
+DB path: $DB
+Module path: $REPO
+
+For each page below, extract factual, reusable knowledge into the memories database using this Python pattern:
+
+\`\`\`python
+import sys
+sys.path.insert(0, '$REPO')
+from user_memories import MemoryDB
+mem = MemoryDB('$DB')
+# mem.upsert(key, value, tags=[...], source='notion:page' or 'notion:transcription')
+# Valid key prefixes: contact:Name, project:Name, business:Topic, work:Topic,
+#   relationship:Name, product:Name, company:Name, activity:Description
+# Valid tags: contact, work, knowledge, finance, tool
+mem.close()
+\`\`\`
+
+Focus on: people, companies, projects, decisions, relationships, tools, financial details.
+Skip: trivial content, formatting artifacts, meeting logistics, templates.
+The user is Matthew Diakonov (Matt). Email: i@m13v.com, company: Mediar.
+
+--- NOTION PAGES ---
+$NOTION_DUMP" --max-turns 30 2>&1 | tee -a "$LOG_FILE"
+  else
+    echo "No Notion pages with enough content to process." | tee -a "$LOG_FILE"
+  fi
+else
+  echo "No changed Notion pages since last sync." | tee -a "$LOG_FILE"
+fi
 
 # Check if there are unreviewed entries
 UNREVIEWED=$(cd "$REPO" && source "$VENV" && python -c "

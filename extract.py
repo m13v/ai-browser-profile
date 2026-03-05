@@ -26,8 +26,6 @@ def main():
                         help="Skip Local Storage extraction (LinkedIn connections)")
     parser.add_argument("--no-notion", action="store_true",
                         help="Skip Notion extraction (workspace, users, pages)")
-    parser.add_argument("--no-notion-llm", action="store_true",
-                        help="Skip Notion LLM extraction (Tier 2 page analysis)")
     args = parser.parse_args()
 
     browsers = set(b.lower() for b in args.browsers) if args.browsers else None
@@ -38,7 +36,6 @@ def main():
         skip_indexeddb=args.no_indexeddb,
         skip_localstorage=args.no_localstorage,
         skip_notion=args.no_notion,
-        skip_notion_llm=args.no_notion_llm,
     )
     stats = mem.stats()
     log.info(f"Done — {stats['total_memories']} memories in {args.output}")
