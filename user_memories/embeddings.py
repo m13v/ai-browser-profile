@@ -46,7 +46,7 @@ def _load_model():
         _session = ort.InferenceSession(onnx_path, providers=providers)
 
         _tokenizer = Tokenizer.from_file(tok_path)
-        _tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=MAX_LENGTH)
+        # Only truncate; padding is done dynamically per-batch in _embed_raw
         _tokenizer.enable_truncation(max_length=MAX_LENGTH)
 
         log.info(f"Loaded embedding model: {MODEL_NAME} (ONNX, {_session.get_providers()})")
@@ -64,14 +64,19 @@ def _embed_raw(texts: list[str]) -> list[Optional[list[float]]]:
     import numpy as np
 
     results = []
-    # Process in batches
-    batch_size = 64
+    batch_size = 32
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
         encoded = _tokenizer.encode_batch(batch)
 
-        input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
-        attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+        # Dynamic padding: pad to max length in this batch, not MAX_LENGTH
+        max_len = max(len(e.ids) for e in encoded)
+        input_ids = np.zeros((len(encoded), max_len), dtype=np.int64)
+        attention_mask = np.zeros((len(encoded), max_len), dtype=np.int64)
+        for j, e in enumerate(encoded):
+            seq_len = len(e.ids)
+            input_ids[j, :seq_len] = e.ids
+            attention_mask[j, :seq_len] = e.attention_mask
         token_type_ids = np.zeros_like(input_ids)
 
         outputs = _session.run(None, {
