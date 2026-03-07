@@ -4,6 +4,9 @@ Uses a plain SQLite table for embeddings (no sqlite-vec extension needed)
 and computes cosine similarity in Python via numpy.
 
 Model: nomic-embed-text-v1.5 (768-dim, 2K context, MTEB ~65).
+Runtime: ONNX Runtime (~50MB) with pre-built quantized model (~131MB).
+No PyTorch, transformers, scipy, or sklearn needed.
+
 Nomic uses task prefixes: "search_document: " for stored texts,
 "search_query: " for queries.
 """
@@ -15,30 +18,83 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 # Module-level state — loaded on first call
-_model = None
+_session = None
+_tokenizer = None
 
 EMBEDDING_DIM = 768
 MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
+ONNX_FILE = "onnx/model_quantized.onnx"
+MAX_LENGTH = 512
 
 
 def _load_model():
-    """Load sentence-transformers model on first use (~274MB download)."""
-    global _model
-    if _model is not None:
-        return _model
+    """Load ONNX model + tokenizer on first use (~131MB download)."""
+    global _session, _tokenizer
+    if _session is not None:
+        return True
     try:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(MODEL_NAME, trust_remote_code=True)
-        log.info(f"Loaded embedding model: {MODEL_NAME}")
-    except ImportError:
-        log.warning("sentence-transformers not installed — semantic search disabled")
-        _model = None
-    return _model
+        import onnxruntime as ort
+        from huggingface_hub import hf_hub_download
+        from tokenizers import Tokenizer
+
+        onnx_path = hf_hub_download(MODEL_NAME, ONNX_FILE)
+        tok_path = hf_hub_download(MODEL_NAME, "tokenizer.json")
+
+        providers = ['CoreMLExecutionProvider', 'CPUExecutionProvider'] \
+            if 'CoreMLExecutionProvider' in ort.get_available_providers() \
+            else ['CPUExecutionProvider']
+        _session = ort.InferenceSession(onnx_path, providers=providers)
+
+        _tokenizer = Tokenizer.from_file(tok_path)
+        _tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=MAX_LENGTH)
+        _tokenizer.enable_truncation(max_length=MAX_LENGTH)
+
+        log.info(f"Loaded embedding model: {MODEL_NAME} (ONNX, {_session.get_providers()})")
+        return True
+    except ImportError as e:
+        log.warning(f"ONNX runtime dependencies not installed — semantic search disabled: {e}")
+        return False
+    except Exception as e:
+        log.warning(f"Failed to load embedding model: {e}")
+        return False
+
+
+def _embed_raw(texts: list[str]) -> list[Optional[list[float]]]:
+    """Embed pre-prefixed texts via ONNX Runtime. Returns normalized vectors."""
+    import numpy as np
+
+    results = []
+    # Process in batches
+    batch_size = 64
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        encoded = _tokenizer.encode_batch(batch)
+
+        input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+        token_type_ids = np.zeros_like(input_ids)
+
+        outputs = _session.run(None, {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+        })
+
+        last_hidden = outputs[0]  # (batch, seq, 768)
+        mask = attention_mask[:, :, None].astype(np.float32)
+        emb = (last_hidden * mask).sum(axis=1) / mask.sum(axis=1)
+        norms = np.linalg.norm(emb, axis=1, keepdims=True)
+        emb = emb / norms
+
+        for vec in emb:
+            results.append(vec.tolist())
+
+    return results
 
 
 def is_available() -> bool:
     """Check if embedding model can be loaded."""
-    return _load_model() is not None
+    return _load_model()
 
 
 def embed_text(text: str, prefix: str = "search_document") -> Optional[list[float]]:
@@ -48,21 +104,18 @@ def embed_text(text: str, prefix: str = "search_document") -> Optional[list[floa
         text: The text to embed.
         prefix: "search_document" for storing, "search_query" for searching.
     """
-    model = _load_model()
-    if model is None:
+    if not _load_model():
         return None
-    vec = model.encode(f"{prefix}: {text}", normalize_embeddings=True)
-    return vec.tolist()
+    results = _embed_raw([f"{prefix}: {text}"])
+    return results[0] if results else None
 
 
 def embed_batch(texts: list[str], prefix: str = "search_document") -> list[Optional[list[float]]]:
     """Embed a batch of texts. Returns list of 768-dim vectors."""
-    model = _load_model()
-    if model is None:
+    if not _load_model():
         return [None] * len(texts)
     prefixed = [f"{prefix}: {t}" for t in texts]
-    vecs = model.encode(prefixed, normalize_embeddings=True, batch_size=64)
-    return [v.tolist() for v in vecs]
+    return _embed_raw(prefixed)
 
 
 def _serialize_vec(vec: list[float]) -> bytes:
