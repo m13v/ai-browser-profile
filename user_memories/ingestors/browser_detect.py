@@ -78,14 +78,18 @@ def copy_db(src: Path) -> Optional[Path]:
     """Copy a SQLite DB to temp dir to avoid browser locks."""
     if not src.exists():
         return None
-    tmp = Path(tempfile.mkdtemp(prefix="user_memories_"))
-    dst = tmp / src.name
-    shutil.copy2(src, dst)
-    for suffix in ["-wal", "-shm"]:
-        wal = src.parent / (src.name + suffix)
-        if wal.exists():
-            shutil.copy2(wal, tmp / (src.name + suffix))
-    return dst
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="user_memories_"))
+        dst = tmp / src.name
+        shutil.copy2(src, dst)
+        for suffix in ["-wal", "-shm"]:
+            wal = src.parent / (src.name + suffix)
+            if wal.exists():
+                shutil.copy2(wal, tmp / (src.name + suffix))
+        return dst
+    except PermissionError:
+        log.warning(f"Permission denied reading {src} — grant Full Disk Access or skip")
+        return None
 
 
 def domain(url: str) -> str:
