@@ -11,6 +11,7 @@ Rules:
 7. Mark everything touched as reviewed
 """
 
+import os
 import re
 import sys
 import logging
@@ -19,10 +20,10 @@ from datetime import datetime, timezone
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("clean")
 
-sys.path.insert(0, "/Users/matthewdi/user-memories")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from user_memories import MemoryDB
 
-DB_PATH = "/Users/matthewdi/user-memories/memories.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memories.db")
 
 SINGLE_VALUE_KEYS = ["first_name", "last_name", "full_name", "card_holder_name"]
 
