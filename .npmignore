@@ -3,7 +3,7 @@ memories.db
 *.db-shm
 *.db-wal
 .venv/
-__pycache__/
+**/__pycache__/
 *.pyc
 scripts/
 .claude/
@@ -12,3 +12,5 @@ review/logs/
 *.log
 node_modules/
 launchd/
+.python-version
+.metadata_never_index
