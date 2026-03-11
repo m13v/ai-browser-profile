@@ -157,6 +157,10 @@ function init() {
     console.log('  .venv exists — skipping creation');
   }
 
+  // Upgrade pip first (old pip can't find some packages)
+  console.log('  upgrading pip...');
+  spawnSync(pythonPath(), ['-m', 'pip', 'install', '--upgrade', 'pip', '-q'], { stdio: 'inherit' });
+
   // Install core deps
   console.log('  installing core dependencies...');
   const pipResult = spawnSync(pipPath(), ['install', ...CORE_DEPS, '-q'], { stdio: 'inherit' });
