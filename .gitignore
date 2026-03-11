@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 scripts/
 .claude/
+node_modules/
+review/logs/
