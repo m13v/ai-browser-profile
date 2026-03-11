@@ -1,0 +1,14 @@
+memories.db
+*.db
+*.db-shm
+*.db-wal
+.venv/
+__pycache__/
+*.pyc
+scripts/
+.claude/
+.git/
+review/logs/
+*.log
+node_modules/
+launchd/
