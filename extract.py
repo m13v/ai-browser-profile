@@ -5,6 +5,7 @@ import argparse
 import logging
 
 from user_memories import extract_memories
+from clean import run_cleanup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +27,8 @@ def main():
                         help="Skip Local Storage extraction (LinkedIn connections)")
     parser.add_argument("--no-notion", action="store_true",
                         help="Skip Notion extraction (workspace, users, pages)")
+    parser.add_argument("--no-clean", action="store_true",
+                        help="Skip auto-cleanup after extraction")
     args = parser.parse_args()
 
     browsers = set(b.lower() for b in args.browsers) if args.browsers else None
@@ -38,8 +41,12 @@ def main():
         skip_notion=args.no_notion,
     )
     stats = mem.stats()
-    log.info(f"Done — {stats['total_memories']} memories in {args.output}")
+    log.info(f"Extraction done — {stats['total_memories']} memories in {args.output}")
     mem.close()
+
+    if not args.no_clean:
+        log.info("Running auto-cleanup...")
+        run_cleanup(db_path=args.output)
 
 
 if __name__ == "__main__":
