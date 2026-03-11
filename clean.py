@@ -140,6 +140,15 @@ def run_cleanup(db_path: str = DB_PATH, dry_run: bool = False):
     if not dry_run:
         conn.commit()
 
+    # ── 4. Delete remaining superseded entries ────────────────────
+    superseded_ids = [r[0] for r in conn.execute(
+        "SELECT id FROM memories WHERE superseded_by IS NOT NULL"
+    ).fetchall()]
+    for mid in superseded_ids:
+        delete_id(mid)
+    stats["superseded_deleted"] = len(superseded_ids)
+    log.info(f"Deleted {len(superseded_ids)} superseded entries")
+
     # ── 5. Deduplicate phones ─────────────────────────────────────
     phone_rows = conn.execute(
         "SELECT id, value, appeared_count FROM memories WHERE key='phone' AND superseded_by IS NULL"
