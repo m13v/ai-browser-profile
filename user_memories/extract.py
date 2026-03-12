@@ -5,6 +5,7 @@ import time
 from typing import Optional, Set
 
 from user_memories.db import MemoryDB
+from user_memories.embeddings import setup_embeddings_table
 from user_memories.ingestors.browser_detect import detect_browsers
 from user_memories.ingestors.webdata import ingest_webdata
 from user_memories.ingestors.history import ingest_history
@@ -38,7 +39,7 @@ def extract_memories(memories_db_path: str = "memories.db",
         skip_localstorage: Skip Local Storage extraction (requires ccl_chromium_reader).
     """
     total_start = time.monotonic()
-    mem = MemoryDB(memories_db_path)
+    mem = MemoryDB(memories_db_path, defer_embeddings=True)
     profiles = detect_browsers(allowed=browsers)
     log.info(f"Extracting memories from {len(profiles)} profiles...")
 
@@ -79,6 +80,13 @@ def extract_memories(memories_db_path: str = "memories.db",
             log.warning(f"Notion ingestor failed: {e}")
 
     mem.conn.commit()
+
+    # 8. Embeddings — backfill all at once (loads ONNX model once, batches efficiently)
+    mem._vec_ready = setup_embeddings_table(mem.conn)
+    mem._defer_embeddings = False
+    if mem._vec_ready:
+        _timed("Embeddings", mem.backfill_embeddings)
+
     total_elapsed = time.monotonic() - total_start
     stats = mem.stats()
     log.info(
