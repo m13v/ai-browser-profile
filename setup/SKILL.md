@@ -94,31 +94,18 @@ This scans all detected browsers (Arc, Chrome, Brave, Edge, Safari, Firefox) and
 - Notion (workspace contacts, if configured)
 - Embeddings (semantic vectors, backfilled at end)
 
-**The pipeline logs progress per step:**
+**INTERIM PROFILE:** The extraction pipeline prints an interim profile after the fast steps (autofill, history, bookmarks, logins, Notion — ~1s total) but before the slow steps (WhatsApp ~10s, embeddings ~3min). **As soon as you see the "Interim profile ready" log line, show the profile to the user immediately.** Don't wait for WhatsApp or embeddings to finish — the profile already has all identity, email, address, payment, account, and tool data. WhatsApp only adds a contact count.
+
+Look for this in the logs:
 ```
-[Autofill] starting...
-[Autofill] done in 0.1s
-[History] starting...
-  History: 874 domains, 45 known services
-[History] done in 1.8s
-[Bookmarks] starting...
-[Bookmarks] done in 0.4s
-[Logins] starting...
-[Logins] done in 2.1s
-[LinkedIn] starting...
-[LinkedIn] done in 8.7s
-[Notion] starting...
-[Notion] done in 0.1s
-[WhatsApp] starting...
-[WhatsApp] done in 15.3s
-[Embeddings] starting...
-  Backfilling embeddings for 5400 memories...
-[Embeddings] done in 22.4s
-Total extraction time: 54.0s
-Running auto-cleanup...
+Interim profile ready (WhatsApp + embeddings still running):
+## User Profile
+**Name:** ...
 ```
 
-**After extraction + cleanup finish, report a summary to the user:**
+**Show this to the user right away**, then let the extraction continue in the background. Tell them: "Here's your profile from browser data. WhatsApp contacts and semantic embeddings are still processing..."
+
+**After extraction + cleanup finish, report a final summary to the user:**
 
 ```
 Extraction complete:
