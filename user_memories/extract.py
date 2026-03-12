@@ -43,27 +43,27 @@ def extract_memories(memories_db_path: str = "memories.db",
     profiles = detect_browsers(allowed=browsers)
     log.info(f"Extracting memories from {len(profiles)} profiles...")
 
-    # 1. Web Data (autofill, addresses, credit cards) — reads browser files directly
-    _timed("Web Data", ingest_webdata, mem)
+    # 1. Autofill — saved form data, addresses, credit cards
+    _timed("Autofill", ingest_webdata, mem)
 
-    # 2. History → tool/service usage
+    # 2. History — tools and services used
     _timed("History", ingest_history, mem, profiles)
 
-    # 3. Bookmarks → interests + tool boosts
+    # 3. Bookmarks — interests and saved links
     _timed("Bookmarks", ingest_bookmarks, mem, profiles)
 
-    # 4. Logins → accounts + emails
+    # 4. Logins — saved accounts per site
     _timed("Logins", ingest_logins, mem, profiles)
 
-    # 5. Local Storage → LinkedIn connections
+    # 5. LinkedIn — connections from Local Storage
     if not skip_localstorage:
         try:
             from user_memories.ingestors.localstorage import ingest_localstorage
-            _timed("Local Storage", ingest_localstorage, mem, profiles)
+            _timed("LinkedIn", ingest_localstorage, mem, profiles)
         except ImportError:
-            log.warning("ccl_chromium_reader not installed — skipping Local Storage")
+            log.warning("ccl_chromium_reader not installed — skipping LinkedIn")
 
-    # 6. Notion → workspace contacts, page knowledge, meeting summaries
+    # 6. Notion — workspace contacts, pages, meetings
     if not skip_notion:
         try:
             from user_memories.ingestors.notion import ingest_notion
@@ -71,13 +71,13 @@ def extract_memories(memories_db_path: str = "memories.db",
         except Exception as e:
             log.warning(f"Notion ingestor failed: {e}")
 
-    # 7. IndexedDB → WhatsApp contacts (slow — runs last before embeddings)
+    # 7. WhatsApp — contacts from IndexedDB (slow, runs last)
     if not skip_indexeddb:
         try:
             from user_memories.ingestors.indexeddb import ingest_indexeddb
-            _timed("IndexedDB", ingest_indexeddb, mem, profiles)
+            _timed("WhatsApp", ingest_indexeddb, mem, profiles)
         except ImportError:
-            log.warning("ccl_chromium_reader not installed — skipping IndexedDB")
+            log.warning("ccl_chromium_reader not installed — skipping WhatsApp")
 
     mem.conn.commit()
 
