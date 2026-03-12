@@ -614,7 +614,7 @@ class MemoryDB:
         # Identity
         name_parts = [pick("first_name"), pick("last_name")]
         full_name = pick("full_name") or " ".join(n for n in name_parts if n)
-        emails = pick("email", n=10, min_appeared=3)
+        emails = pick("email", n=10, min_appeared=5)
         phones = pick("phone", n=5, min_appeared=2)
         # Usernames: exclude values that look like emails
         raw_usernames = pick("username", n=20, min_appeared=2) or []
@@ -761,11 +761,23 @@ class MemoryDB:
             lines.append("**Accounts:**")
             for user, domains in sorted(p["accounts"].items(),
                                          key=lambda x: len(x[1]), reverse=True)[:8]:
-                # Clean domain names: remove www. and common TLD suffixes
+                # Clean domain names: extract meaningful service name
                 seen = set()
                 short_domains = []
                 for d in domains:
-                    short = d.replace("www.", "").split(".")[0]
+                    # Use second-level domain as service name
+                    parts = d.replace("www.", "").split(".")
+                    if len(parts) >= 2:
+                        short = parts[-2]  # e.g. "mercury" from "app.mercury.com"
+                    else:
+                        short = parts[0]
+                    # Skip generic TLDs, gov subdomains, localhost
+                    if short in ("com", "co", "io", "ai", "org", "net", "ru",
+                                 "gov", "ca", "us", "localhost", "localhost:3000"):
+                        # For .gov domains (dmv.ca.gov), use the subdomain
+                        short = parts[0] if len(parts) > 2 else d
+                    if "localhost" in short:
+                        continue
                     if short not in seen:
                         seen.add(short)
                         short_domains.append(short)
@@ -775,9 +787,18 @@ class MemoryDB:
 
         # Projects
         if p.get("projects"):
-            # Clean up Notion page titles
-            clean = [name.rstrip(" ‣").strip() for name in p["projects"][:10]]
-            lines.append(f"**Projects:** {', '.join(clean)}")
+            # Clean up Notion page titles, deduplicate by core name
+            seen_proj = set()
+            clean = []
+            for name in p["projects"]:
+                c = name.rstrip(" ‣").strip()
+                # Extract last meaningful name for dedup (e.g. "Eugene O'Donald" from "TBD: Eugene O'Donald")
+                core = c.split(" - ")[-1].split(": ")[-1].lower().strip()
+                if core not in seen_proj and c:
+                    seen_proj.add(core)
+                    clean.append(c)
+            if clean:
+                lines.append(f"**Projects:** {', '.join(clean[:10])}")
 
         # Contacts
         if p.get("total_contacts"):
