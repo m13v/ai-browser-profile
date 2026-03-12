@@ -582,103 +582,123 @@ class MemoryDB:
     def profile(self) -> dict:
         """Generate structured user profile from non-superseded memories."""
         rows = self.conn.execute("""
-            SELECT m.id, m.key, m.value, m.appeared_count
+            SELECT m.key, m.value, m.appeared_count
             FROM memories m
             WHERE m.superseded_by IS NULL
             ORDER BY m.appeared_count DESC, m.accessed_count DESC
         """).fetchall()
 
         by_key: dict[str, list[tuple]] = {}
-        for mid, key, value, appeared in rows:
+        for key, value, appeared in rows:
             by_key.setdefault(key, []).append((value, appeared))
 
-        def pick_single(k):
-            vals = by_key.get(k, [])
-            return vals[0][0] if vals else None
+        def pick(k, n=1, min_appeared=1):
+            """Pick top n values for a key, filtered by min appeared_count."""
+            vals = [(v, a) for v, a in by_key.get(k, []) if a >= min_appeared]
+            if n == 1:
+                return vals[0][0] if vals else None
+            return [v for v, _ in vals[:n]]
 
-        def pick_multi(prefix, n=20):
+        def pick_prefixed(prefix, n=20, min_appeared=1):
+            """Pick top n entries matching a key prefix."""
             items = []
             for k, vals in by_key.items():
                 if k.startswith(prefix):
                     suffix = k[len(prefix):]
-                    # vals[0] = (value, appeared_count), sorted by appeared desc
-                    items.append((suffix, vals[0][0], vals[0][1]))
+                    top_val, top_appeared = vals[0]
+                    if top_appeared >= min_appeared:
+                        items.append((suffix, top_val, top_appeared))
             items.sort(key=lambda x: x[2], reverse=True)
-            return {name: val for name, val, _ in items[:n]}
+            return [(name, val) for name, val, _ in items[:n]]
 
-        identity = {}
-        for k in PROFILE_SECTIONS["identity"]:
-            v = pick_single(k)
-            if v:
-                identity[k] = v
+        # Identity
+        name_parts = [pick("first_name"), pick("last_name")]
+        full_name = pick("full_name") or " ".join(n for n in name_parts if n)
+        emails = pick("email", n=10, min_appeared=2)
+        phones = pick("phone", n=5, min_appeared=2)
+        usernames = pick("username", n=10, min_appeared=2)
 
-        address = {}
-        for k in PROFILE_SECTIONS["address"]:
-            v = pick_single(k)
-            if v:
-                address[k] = v
+        # Addresses — group components by most common street
+        addresses = []
+        streets = pick("street_address", n=5, min_appeared=2)
+        if streets:
+            # Primary address uses top values
+            primary = {
+                "street": streets[0] if streets else None,
+                "city": pick("city"), "state": pick("state"),
+                "zip": pick("zip"), "country": pick("country"),
+            }
+            addresses.append(primary)
+            for s in streets[1:]:
+                addresses.append({"street": s})
 
-        payment = {}
-        for k in PROFILE_SECTIONS["payment"]:
-            v = pick_single(k)
-            if v:
-                payment[k] = v
+        # Payment
+        card_holder = pick("card_holder_name")
+        expiries = pick("card_expiry", n=20)
+        active_cards = [e for e in (expiries or []) if isinstance(e, str)]
 
-        work = {}
-        company = pick_single("company")
-        if company:
-            work["company"] = company
+        # Work
+        companies = pick("company", n=5, min_appeared=2)
 
-        accounts = pick_multi("account:")
-        tools = {}
-        for k, vals in by_key.items():
-            if k.startswith("tool:"):
-                name = k[5:]
-                tools[name] = vals[0][0]
+        # Tools — sorted by appeared_count
+        tool_items = pick_prefixed("tool:", n=20)
 
-        contacts = pick_multi("contact:")
-        linkedin = pick_multi("linkedin:")
+        # Accounts — group by username/email
+        acct_items = pick_prefixed("account:", n=50)
+        accounts_by_user: dict[str, list[str]] = {}
+        for domain, user in acct_items:
+            accounts_by_user.setdefault(user, []).append(domain)
 
-        if linkedin:
-            work["linkedin_contacts"] = linkedin
-        if tools:
-            work["tools"] = list(tools.keys())[:20]
+        # Contacts
+        contact_items = pick_prefixed("contact:", n=10000)
+        total_contacts = len(contact_items)
+        # Top contacts by appeared_count (skip noise like <Undefined>, single chars)
+        top_contacts = [(name, val) for name, val in contact_items
+                        if len(name) > 2 and name != "<Undefined>"][:20]
 
-        result = {}
-        if identity:
-            result["identity"] = identity
-        if address:
-            result["address"] = address
-        if payment:
-            result["payment"] = payment
-        if work:
-            result["work"] = work
-        if accounts:
-            result["accounts"] = accounts
-        if contacts:
-            result["contacts"] = contacts
-        if tools:
-            result["tools"] = tools
-        return result
+        # Projects (Notion)
+        project_items = pick_prefixed("project:", n=20)
+
+        return {
+            "name": full_name or None,
+            "emails": emails or [],
+            "phones": phones or [],
+            "usernames": usernames or [],
+            "gender": pick("gender"),
+            "date_of_birth": pick("date_of_birth"),
+            "addresses": addresses,
+            "card_holder": card_holder,
+            "active_cards": len(active_cards),
+            "companies": companies or [],
+            "tools": [name for name, _ in tool_items],
+            "accounts": accounts_by_user,
+            "total_contacts": total_contacts,
+            "top_contacts": top_contacts,
+            "projects": [name for name, _ in project_items],
+        }
 
     def profile_text(self) -> str:
         """Format profile as markdown text for LLM context injection."""
         p = self.profile()
         lines = ["## User Profile"]
 
-        ident = p.get("identity", {})
-        name_parts = [ident.get("first_name", ""), ident.get("last_name", "")]
-        name = ident.get("full_name") or " ".join(n for n in name_parts if n)
-        if name:
-            lines.append(f"**Name:** {name}")
-        if ident.get("email"):
-            lines.append(f"**Email:** {ident['email']}")
-        if ident.get("phone"):
-            lines.append(f"**Phone:** {ident['phone']}")
+        if p["name"]:
+            lines.append(f"**Name:** {p['name']}")
+        if p.get("gender"):
+            lines[-1] += f" ({p['gender']})"
 
-        addr = p.get("address", {})
-        if addr:
-            parts = [addr.get("street_address", ""), addr.get("address_line_2", "")]
+        if p["emails"]:
+            lines.append(f"**Emails:** {', '.join(p['emails'])}")
+
+        if p["phones"]:
+            lines.append(f"**Phones:** {', '.join(p['phones'])}")
+
+        if p["usernames"]:
+            lines.append(f"**Handles:** {', '.join(p['usernames'])}")
+
+        # Addresses
+        for i, addr in enumerate(p.get("addresses", [])):
+            parts = [addr.get("street", "")]
             city_state = ", ".join(filter(None, [addr.get("city"), addr.get("state")]))
             if city_state:
                 parts.append(city_state)
@@ -688,29 +708,49 @@ class MemoryDB:
                 parts.append(addr["country"])
             addr_str = ", ".join(filter(None, parts))
             if addr_str:
-                lines.append(f"**Address:** {addr_str}")
+                label = "**Address:**" if i == 0 else "**Address " + str(i + 1) + ":**"
+                lines.append(f"{label} {addr_str}")
 
-        pay = p.get("payment", {})
-        if pay.get("card_holder_name"):
-            lines.append(f"**Card Holder:** {pay['card_holder_name']}")
+        # Payment
+        if p.get("card_holder") or p.get("active_cards"):
+            card_parts = []
+            if p["card_holder"]:
+                card_parts.append(p["card_holder"])
+            if p["active_cards"]:
+                card_parts.append(f"{p['active_cards']} cards on file")
+            lines.append(f"**Payment:** {', '.join(card_parts)}")
 
-        work = p.get("work", {})
-        if work.get("company"):
-            lines.append(f"**Company:** {work['company']}")
+        # Companies
+        if p.get("companies"):
+            if isinstance(p["companies"], list):
+                lines.append(f"**Companies:** {', '.join(p['companies'])}")
+            else:
+                lines.append(f"**Company:** {p['companies']}")
 
-        tools = p.get("tools", {})
-        if tools:
-            top = list(tools.keys())[:10]
-            lines.append(f"**Top Tools:** {', '.join(top)}")
+        # Tools
+        if p.get("tools"):
+            lines.append(f"**Top Tools:** {', '.join(p['tools'][:15])}")
 
-        accounts = p.get("accounts", {})
-        if accounts:
-            acct_strs = [f"{site} ({user})" for site, user in list(accounts.items())[:10]]
-            lines.append(f"**Accounts:** {', '.join(acct_strs)}")
+        # Accounts grouped by identity
+        if p.get("accounts"):
+            lines.append("**Accounts:**")
+            for user, domains in sorted(p["accounts"].items(),
+                                         key=lambda x: len(x[1]), reverse=True)[:8]:
+                short_domains = [d.replace("www.", "").split(".")[0] for d in domains[:6]]
+                extra = f" +{len(domains) - 6}" if len(domains) > 6 else ""
+                lines.append(f"  {user}: {', '.join(short_domains)}{extra}")
 
-        contacts = p.get("contacts", {})
-        if contacts:
-            lines.append(f"**Contacts:** {len(contacts)} saved")
+        # Projects
+        if p.get("projects"):
+            lines.append(f"**Projects:** {', '.join(p['projects'][:10])}")
+
+        # Contacts
+        if p.get("total_contacts"):
+            top = p.get("top_contacts", [])
+            lines.append(f"**Contacts:** {p['total_contacts']} total")
+            if top:
+                names = [name for name, _ in top[:15]]
+                lines.append(f"  Top: {', '.join(names)}")
 
         return "\n".join(lines)
 
