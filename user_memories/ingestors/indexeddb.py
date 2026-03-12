@@ -157,4 +157,47 @@ def ingest_indexeddb(mem: MemoryDB, profiles: list[BrowserProfile]):
     for (name, _phone), entry in seen.items():
         mem.upsert(f"contact:{name}", entry["value"], entry["tags"], source="whatsapp")
 
+    # Clean up old JID-format entries (@c.us, @s.whatsapp.net) that now have normalized phone values
+    old_jid_rows = mem.conn.execute("""
+        SELECT id, key, value FROM memories
+        WHERE source = 'whatsapp'
+          AND (value LIKE '%@c.us' OR value LIKE '%@s.whatsapp.net')
+          AND superseded_by IS NULL
+    """).fetchall()
+
+    cleaned = 0
+    for old_id, old_key, old_value in old_jid_rows:
+        # Check if a normalized version exists for the same contact name
+        normalized = mem.conn.execute("""
+            SELECT id FROM memories
+            WHERE key = ? AND source = 'whatsapp'
+              AND value NOT LIKE '%@c.us' AND value NOT LIKE '%@s.whatsapp.net'
+              AND superseded_by IS NULL
+            LIMIT 1
+        """, (old_key,)).fetchone()
+        if normalized:
+            mem.conn.execute(
+                "UPDATE memories SET superseded_by = ? WHERE id = ?",
+                (normalized[0], old_id),
+            )
+            cleaned += 1
+        else:
+            # No normalized version — delete the junk entry entirely
+            mem.conn.execute("DELETE FROM memories WHERE id = ?", (old_id,))
+            cleaned += 1
+
+    if cleaned:
+        mem.conn.commit()
+        log.info(f"  Cleaned {cleaned} old JID-format WhatsApp entries")
+
+    # Also clean up junk names that slipped through previous extractions
+    junk = mem.conn.execute("""
+        DELETE FROM memories
+        WHERE source = 'whatsapp' AND superseded_by IS NULL
+          AND (value = '<Undefined>' OR key = 'contact:.' OR key = 'contact:<Undefined>')
+    """).rowcount
+    if junk:
+        mem.conn.commit()
+        log.info(f"  Deleted {junk} junk WhatsApp entries")
+
     log.info(f"  IndexedDB: {len(seen)} WhatsApp contacts (deduplicated)")
