@@ -73,6 +73,12 @@ def extract_memories(memories_db_path: str = "memories.db",
 
     # -- Interim profile: core data is ready, show it before slow steps --
     mem.conn.commit()
+    # Run cleanup before showing profile so noise is removed
+    from clean import run_cleanup
+    log.info("Running interim cleanup...")
+    mem.close()
+    run_cleanup(db_path=memories_db_path)
+    mem = MemoryDB(memories_db_path, defer_embeddings=True)
     interim_profile = mem.profile_text()
     log.info(f"Interim profile ready (WhatsApp + embeddings still running):\n{interim_profile}")
 
