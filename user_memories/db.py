@@ -582,18 +582,15 @@ class MemoryDB:
     def profile(self) -> dict:
         """Generate structured user profile from non-superseded memories."""
         rows = self.conn.execute("""
-            SELECT m.id, m.key, m.value,
-                   CASE WHEN m.appeared_count = 0 THEN 0.0
-                        ELSE CAST(m.accessed_count AS REAL) / m.appeared_count
-                   END AS hit_rate
+            SELECT m.id, m.key, m.value, m.appeared_count
             FROM memories m
             WHERE m.superseded_by IS NULL
-            ORDER BY hit_rate DESC, m.accessed_count DESC
+            ORDER BY m.appeared_count DESC, m.accessed_count DESC
         """).fetchall()
 
         by_key: dict[str, list[tuple]] = {}
-        for mid, key, value, hit_rate in rows:
-            by_key.setdefault(key, []).append((value, hit_rate))
+        for mid, key, value, appeared in rows:
+            by_key.setdefault(key, []).append((value, appeared))
 
         def pick_single(k):
             vals = by_key.get(k, [])
