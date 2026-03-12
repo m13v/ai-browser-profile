@@ -614,37 +614,66 @@ class MemoryDB:
         # Identity
         name_parts = [pick("first_name"), pick("last_name")]
         full_name = pick("full_name") or " ".join(n for n in name_parts if n)
-        emails = pick("email", n=10, min_appeared=2)
+        emails = pick("email", n=10, min_appeared=3)
         phones = pick("phone", n=5, min_appeared=2)
-        usernames = pick("username", n=10, min_appeared=2)
+        # Usernames: exclude values that look like emails
+        raw_usernames = pick("username", n=20, min_appeared=2) or []
+        usernames = [u for u in raw_usernames if "@" not in u and "." not in u]
 
-        # Addresses — group components by most common street
+        # Addresses — deduplicate similar streets, group into full addresses
         addresses = []
-        streets = pick("street_address", n=5, min_appeared=2)
-        if streets:
-            # Primary address uses top values
+        raw_streets = pick("street_address", n=10, min_appeared=2) or []
+        # Deduplicate: normalize by lowercasing and stripping punctuation
+        seen_streets = set()
+        unique_streets = []
+        for s in raw_streets:
+            # Clean trailing commas/spaces
+            s = s.rstrip(", ")
+            normalized = s.lower().replace(" blvd", " boulevard").replace(" st.", " street").replace(" st", " street")
+            if normalized not in seen_streets:
+                seen_streets.add(normalized)
+                unique_streets.append(s)
+        if unique_streets:
             primary = {
-                "street": streets[0] if streets else None,
+                "street": unique_streets[0],
                 "city": pick("city"), "state": pick("state"),
                 "zip": pick("zip"), "country": pick("country"),
             }
             addresses.append(primary)
-            for s in streets[1:]:
+            for s in unique_streets[1:]:
                 addresses.append({"street": s})
 
-        # Payment
+        # Payment — count active (non-expired) cards
         card_holder = pick("card_holder_name")
         expiries = pick("card_expiry", n=20)
-        active_cards = [e for e in (expiries or []) if isinstance(e, str)]
+        from datetime import datetime
+        now_ym = datetime.now().strftime("%Y%m")
+        active_cards = []
+        for e in (expiries or []):
+            if isinstance(e, str) and "/" in e:
+                try:
+                    mm, yyyy = e.split("/")
+                    if f"{yyyy}{mm.zfill(2)}" >= now_ym:
+                        active_cards.append(e)
+                except ValueError:
+                    pass
 
-        # Work
-        companies = pick("company", n=5, min_appeared=2)
+        # Work — deduplicate case-insensitive, strip suffixes
+        raw_companies = pick("company", n=10, min_appeared=2) or []
+        seen_companies = set()
+        companies = []
+        for c in (raw_companies if isinstance(raw_companies, list) else [raw_companies]):
+            # Normalize: lowercase, strip Inc/LLC/etc
+            norm = c.lower().rstrip(".,").replace(", inc", "").replace(" inc", "")
+            if norm not in seen_companies:
+                seen_companies.add(norm)
+                companies.append(c)
 
         # Tools — sorted by appeared_count
         tool_items = pick_prefixed("tool:", n=20)
 
-        # Accounts — group by username/email
-        acct_items = pick_prefixed("account:", n=50)
+        # Accounts — group by username/email, deduplicate domains
+        acct_items = pick_prefixed("account:", n=100)
         accounts_by_user: dict[str, list[str]] = {}
         for domain, user in acct_items:
             accounts_by_user.setdefault(user, []).append(domain)
@@ -652,9 +681,6 @@ class MemoryDB:
         # Contacts
         contact_items = pick_prefixed("contact:", n=10000)
         total_contacts = len(contact_items)
-        # Top contacts by appeared_count (skip noise like <Undefined>, single chars)
-        top_contacts = [(name, val) for name, val in contact_items
-                        if len(name) > 2 and name != "<Undefined>"][:20]
 
         # Projects (Notion)
         project_items = pick_prefixed("project:", n=20)
@@ -673,7 +699,6 @@ class MemoryDB:
             "tools": [name for name, _ in tool_items],
             "accounts": accounts_by_user,
             "total_contacts": total_contacts,
-            "top_contacts": top_contacts,
             "projects": [name for name, _ in project_items],
         }
 
@@ -736,21 +761,27 @@ class MemoryDB:
             lines.append("**Accounts:**")
             for user, domains in sorted(p["accounts"].items(),
                                          key=lambda x: len(x[1]), reverse=True)[:8]:
-                short_domains = [d.replace("www.", "").split(".")[0] for d in domains[:6]]
-                extra = f" +{len(domains) - 6}" if len(domains) > 6 else ""
-                lines.append(f"  {user}: {', '.join(short_domains)}{extra}")
+                # Clean domain names: remove www. and common TLD suffixes
+                seen = set()
+                short_domains = []
+                for d in domains:
+                    short = d.replace("www.", "").split(".")[0]
+                    if short not in seen:
+                        seen.add(short)
+                        short_domains.append(short)
+                display = short_domains[:6]
+                extra = f" +{len(short_domains) - 6}" if len(short_domains) > 6 else ""
+                lines.append(f"  {user}: {', '.join(display)}{extra}")
 
         # Projects
         if p.get("projects"):
-            lines.append(f"**Projects:** {', '.join(p['projects'][:10])}")
+            # Clean up Notion page titles
+            clean = [name.rstrip(" ‣").strip() for name in p["projects"][:10]]
+            lines.append(f"**Projects:** {', '.join(clean)}")
 
         # Contacts
         if p.get("total_contacts"):
-            top = p.get("top_contacts", [])
             lines.append(f"**Contacts:** {p['total_contacts']} total")
-            if top:
-                names = [name for name, _ in top[:15]]
-                lines.append(f"  Top: {', '.join(names)}")
 
         return "\n".join(lines)
 
