@@ -44,12 +44,10 @@ from user_memories import MemoryDB
 mem = MemoryDB(os.path.expanduser("~/user-memories/memories.db"))
 
 # Search returns results ranked by hit_rate (accessed/appeared), then counts
+# accessed_count and appeared_count are auto-incremented on every search call
 results = mem.search(["identity", "contact_info"], limit=10)
 for r in results:
     print(f'{r["key"]}: {r["value"]}')
-
-# When you actually USE a memory, mark it accessed — this trains the ranking
-mem.mark_accessed(results[0]["id"])
 
 mem.close()
 ```
@@ -119,11 +117,11 @@ AND superseded_by IS NULL;
 
 ## Ranking System
 
-Every `search()` call increments `appeared_count` for all returned memories. When the agent actually uses a memory (fills a form, includes in an email, etc.), call `mark_accessed(id)` to increment `accessed_count`.
+Every `search()`, `semantic_search()`, and `text_search()` call automatically increments both `appeared_count` and `accessed_count` for all returned results. No manual `mark_accessed()` calls needed.
 
 **hit_rate** = `accessed_count / appeared_count`
 
-Memories that appear in results but never get used naturally sink in ranking. Memories that get used every time they appear rise to the top. No manual curation needed.
+Memories that are frequently returned by searches rise in ranking. The system is fully automatic — no manual curation or agent instrumentation needed.
 
 ## Semantic Dedup
 
