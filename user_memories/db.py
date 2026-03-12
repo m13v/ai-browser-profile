@@ -102,14 +102,15 @@ PROFILE_SECTIONS = {
 
 
 class MemoryDB:
-    def __init__(self, path: str = "memories.db"):
+    def __init__(self, path: str = "memories.db", defer_embeddings: bool = False):
         self.path = path
         self.conn = sqlite3.connect(path)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
         self._migrate()
-        self._vec_ready = setup_embeddings_table(self.conn)
+        self._defer_embeddings = defer_embeddings
+        self._vec_ready = setup_embeddings_table(self.conn) if not defer_embeddings else False
 
     # ── Migration ──────────────────────────────────────────────────
 
