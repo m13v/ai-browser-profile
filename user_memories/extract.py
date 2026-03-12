@@ -55,15 +55,7 @@ def extract_memories(memories_db_path: str = "memories.db",
     # 4. Logins → accounts + emails
     _timed("Logins", ingest_logins, mem, profiles)
 
-    # 5. IndexedDB → WhatsApp contacts
-    if not skip_indexeddb:
-        try:
-            from user_memories.ingestors.indexeddb import ingest_indexeddb
-            _timed("IndexedDB", ingest_indexeddb, mem, profiles)
-        except ImportError:
-            log.warning("ccl_chromium_reader not installed — skipping IndexedDB")
-
-    # 6. Local Storage → LinkedIn connections
+    # 5. Local Storage → LinkedIn connections
     if not skip_localstorage:
         try:
             from user_memories.ingestors.localstorage import ingest_localstorage
@@ -71,13 +63,21 @@ def extract_memories(memories_db_path: str = "memories.db",
         except ImportError:
             log.warning("ccl_chromium_reader not installed — skipping Local Storage")
 
-    # 7. Notion → workspace contacts, page knowledge, meeting summaries
+    # 6. Notion → workspace contacts, page knowledge, meeting summaries
     if not skip_notion:
         try:
             from user_memories.ingestors.notion import ingest_notion
             _timed("Notion", ingest_notion, mem)
         except Exception as e:
             log.warning(f"Notion ingestor failed: {e}")
+
+    # 7. IndexedDB → WhatsApp contacts (slow — runs last before embeddings)
+    if not skip_indexeddb:
+        try:
+            from user_memories.ingestors.indexeddb import ingest_indexeddb
+            _timed("IndexedDB", ingest_indexeddb, mem, profiles)
+        except ImportError:
+            log.warning("ccl_chromium_reader not installed — skipping IndexedDB")
 
     mem.conn.commit()
 
