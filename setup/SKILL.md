@@ -16,12 +16,20 @@ Interactive setup wizard for user-memories. Walk the user through installation a
 ## Prerequisites
 
 - Node.js 16+ (for `npx`)
-- Python 3.9+
+- Python 3.10+
 - macOS (browser paths are macOS-specific)
 
 ---
 
 ## Setup Flow
+
+Run each step sequentially. **After each step, print a progress status to the user** so they can follow along:
+
+```
+[1/7] Install ............ done (12s)
+[2/7] Verify ............. done (1s)
+[3/7] Extract ............ running...
+```
 
 ### Step 1: Install via npm
 
@@ -47,6 +55,8 @@ To update code later without touching data:
 npx user-memories update
 ```
 
+**Tell the user:** "Installed user-memories to ~/user-memories. Python venv created, core deps installed, skills symlinked."
+
 ### Step 2: Verify the installation
 
 ```bash
@@ -64,20 +74,68 @@ If it fails, check:
 - Python venv exists: `ls ~/user-memories/.venv/bin/python`
 - Deps installed: `~/user-memories/.venv/bin/pip list | grep ccl`
 
-### Step 3: Run first extraction
+**Tell the user:** "Python environment verified - MemoryDB loads correctly."
+
+### Step 3: Run extraction
+
+**IMPORTANT:** Run extraction in the background so you can report progress to the user. The extraction has 8 stages and logs timing for each.
 
 ```bash
-cd ~/user-memories && source .venv/bin/activate && python extract.py
+cd ~/user-memories && source .venv/bin/activate && python extract.py 2>&1
 ```
 
 This scans all detected browsers (Arc, Chrome, Brave, Edge, Safari, Firefox) and extracts:
 - Autofill profiles (names, emails, phones, addresses)
 - Login data (accounts per domain)
 - Browser history (tools/services used)
+- Bookmarks (interests, tool usage)
 - IndexedDB (WhatsApp contacts)
 - Local Storage (LinkedIn connections)
+- Notion (workspace contacts, if configured)
+- Embeddings (semantic vectors, backfilled at end)
 
-Expected output: `Done — N memories in memories.db` where N is typically 200-2000.
+**The pipeline logs progress per step:**
+```
+[Web Data] starting...
+[Web Data] done in 3.2s
+[History] starting...
+  History: 874 domains, 45 known services
+[History] done in 1.8s
+[Bookmarks] starting...
+[Bookmarks] done in 0.4s
+[Logins] starting...
+[Logins] done in 2.1s
+[IndexedDB] starting...
+[IndexedDB] done in 15.3s
+[Local Storage] starting...
+[Local Storage] done in 8.7s
+[Notion] starting...
+[Notion] done in 0.1s
+[Embeddings] starting...
+  Backfilling embeddings for 5400 memories...
+[Embeddings] done in 22.4s
+Total extraction time: 54.0s
+Running auto-cleanup...
+```
+
+**After extraction + cleanup finish, report a summary to the user:**
+
+```
+Extraction complete:
+  Browsers scanned: 8 profiles (Arc, Chrome, Safari, Firefox)
+  Raw memories: 5,878
+  After cleanup: 5,431
+  Time: 54s
+
+  Breakdown:
+    Web Data:      3.2s
+    History:       1.8s
+    Bookmarks:     0.4s
+    Logins:        2.1s
+    IndexedDB:    15.3s (WhatsApp contacts)
+    Local Storage:  8.7s (LinkedIn connections)
+    Embeddings:   22.4s (semantic vectors)
+```
 
 ### Step 4: Verify extraction
 
@@ -95,43 +153,9 @@ mem.close()
 "
 ```
 
-Check that the profile looks reasonable — should show the user's name, email, phone, address.
+**Show the profile to the user.** Check that name, email, phone, address look reasonable. If the primary email is wrong (a contact's email ranked higher), note that the review pipeline will fix this.
 
-### Step 5: Run cleanup (recommended)
-
-The first extraction produces ~50% noise (autofill duplicates, other people's data). Run the rule-based cleanup:
-
-```bash
-cd ~/user-memories && source .venv/bin/activate && python clean.py
-```
-
-This deletes known noise patterns and deduplicates entries. For deeper LLM-powered review, use the `memory-review` skill later.
-
-### Step 6: Install embeddings (optional)
-
-Semantic search lets Claude find memories by meaning ("what's the user's shipping address") instead of just tags. It adds ~180MB of downloads.
-
-Ask: "Do you want semantic search? (adds ~180MB download) (y/n)"
-
-If yes:
-```bash
-npx user-memories install-embeddings
-```
-
-Then backfill embeddings for existing memories:
-```bash
-~/user-memories/.venv/bin/python -c "
-import sys, os
-sys.path.insert(0, os.path.expanduser('~/user-memories'))
-from user_memories import MemoryDB
-mem = MemoryDB(os.path.expanduser('~/user-memories/memories.db'))
-n = mem.backfill_embeddings()
-print(f'Embedded {n} memories')
-mem.close()
-"
-```
-
-### Step 7: Set up automation (optional)
+### Step 5: Set up automation (optional)
 
 Ask: "Do you want weekly automatic extraction + review? (y/n)"
 
@@ -143,23 +167,23 @@ launchctl load ~/Library/LaunchAgents/com.m13v.memory-review.plist
 
 Schedule: extracts new browser data weekly, then runs Claude to review new entries.
 
-### Step 8: Summary
+### Step 6: Summary
 
-Print:
+Print a final status card:
+
 ```
-User Memories Setup Complete
+Setup Complete
 
-  Installed:    ~/user-memories
+  Location:     ~/user-memories
   Database:     ~/user-memories/memories.db
   Python:       ~/user-memories/.venv/bin/python
   Skills:       ~/.claude/skills/user-memories (+ 4 more)
 
-  Memories:     N total
-  Embeddings:   enabled / disabled
-
+  Memories:     5,431
+  Embeddings:   5,431 vectors (semantic search enabled)
   Automation:   launchd weekly / not set up
 
   Try it:       Tell Claude "what's my email address"
   Update:       npx user-memories update
-  Embeddings:   npx user-memories install-embeddings
+  Review:       /memory-review (Claude-powered cleanup)
 ```
