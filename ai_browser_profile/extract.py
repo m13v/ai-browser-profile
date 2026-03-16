@@ -40,6 +40,7 @@ def extract_memories(memories_db_path: str = "memories.db",
     """
     total_start = time.monotonic()
     mem = MemoryDB(memories_db_path, defer_embeddings=True)
+    from ai_browser_profile.ingestors.browser_detect import permission_denied_paths
     profiles = detect_browsers(allowed=browsers)
     log.info(f"Extracting memories from {len(profiles)} profiles...")
 
@@ -80,6 +81,17 @@ def extract_memories(memories_db_path: str = "memories.db",
     run_cleanup(db_path=memories_db_path)
     mem = MemoryDB(memories_db_path, defer_embeddings=True)
     interim_profile = mem.profile_text()
+
+    # Emit structured browser summary so callers can show transparency
+    detected_browsers = sorted(set(p.browser for p in profiles))
+    denied_browsers = sorted(set(
+        p.browser for p in profiles
+        if any(str(p.path) in str(denied) for denied in permission_denied_paths)
+    ))
+    print(f"BROWSERS_SCANNED: {','.join(detected_browsers)}", flush=True)
+    if denied_browsers:
+        print(f"BROWSERS_PERMISSION_DENIED: {','.join(denied_browsers)}", flush=True)
+
     log.info(f"Interim profile ready (WhatsApp + embeddings still running):\n{interim_profile}")
 
     # 7. WhatsApp — contacts from IndexedDB (slow, runs last)

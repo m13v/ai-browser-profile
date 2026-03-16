@@ -13,6 +13,9 @@ log = logging.getLogger(__name__)
 
 APP_SUPPORT = Path.home() / "Library" / "Application Support"
 
+# Populated by copy_db() when a file can't be read due to TCC permissions
+permission_denied_paths: list[Path] = []
+
 
 @dataclass
 class BrowserProfile:
@@ -89,6 +92,7 @@ def copy_db(src: Path) -> Optional[Path]:
         return dst
     except PermissionError:
         log.warning(f"Permission denied reading {src} — grant Full Disk Access or skip")
+        permission_denied_paths.append(src)
         return None
 
 
