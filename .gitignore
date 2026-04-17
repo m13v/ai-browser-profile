@@ -10,3 +10,6 @@ scripts/
 .claude/
 node_modules/
 review/logs/
+.next/
+next-env.d.ts.tsbuildinfo
+*.tsbuildinfo
