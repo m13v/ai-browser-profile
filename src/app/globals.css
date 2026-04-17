@@ -1,0 +1,7 @@
+@import "tailwindcss";
+@source "../../node_modules/@m13v/seo-components/src";
+
+html, body {
+  background: #ffffff;
+  color: #09090b;
+}
