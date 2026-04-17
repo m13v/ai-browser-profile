@@ -5,6 +5,12 @@
   "bin": {
     "ai-browser-profile": "bin/cli.js"
   },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
   "files": [
     "bin/",
     "ai_browser_profile/**/*.py",
@@ -36,5 +42,21 @@
   "homepage": "https://github.com/m13v/ai-browser-profile",
   "engines": {
     "node": ">=16"
+  },
+  "devDependencies": {
+    "@m13v/seo-components": "^0.9.2",
+    "@seo/components": "npm:@m13v/seo-components@^0.9.2",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "framer-motion": "^12.38.0",
+    "next": "16.2.2",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "remotion": "^4.0.446",
+    "@remotion/player": "^4.0.446",
+    "typescript": "^5",
+    "tailwindcss": "^4",
+    "@tailwindcss/postcss": "^4"
   }
 }
