@@ -14,3 +14,10 @@ node_modules/
 launchd/
 .python-version
 .metadata_never_index
+src/
+.next/
+next.config.ts
+next-env.d.ts
+tsconfig.json
+*.tsbuildinfo
+public/
