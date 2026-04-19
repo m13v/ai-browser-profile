@@ -546,8 +546,8 @@ export default function Page() {
           </h2>
           <MetricsRow metrics={METRIC_CARDS} />
           <p className="text-zinc-500 leading-relaxed mt-4">
-            <NumberTicker value={44} />{" "}
-            <span className="text-zinc-500">entries is all that stands between your Rockwell visits and a ranked local memory. The filter exists because it catches browser noise (cdn hosts, analytics endpoints), not because Rockwell was excluded on purpose. It was just never added.</span>
+            <NumberTicker value={69} />{" "}
+            <span className="text-zinc-500">keys is all that stands between your Rockwell visits and a ranked local memory (mapping to 54 unique services). The filter exists because it catches browser noise (cdn hosts, analytics endpoints), not because Rockwell was excluded on purpose. It was just never added.</span>
           </p>
         </section>
 
