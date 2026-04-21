@@ -713,7 +713,7 @@ export default function UserIdentityEmailPage() {
         <ProofBanner
           metric="90"
           quote="matthew.ddy@gmail.com has appeared_count = 90, stitched from autofill on Arc + Chrome plus 60+ login origins including LinkedIn, Heroku, Discord, Mercury, Brex, Stripe, and Apple."
-          source="sqlite3 memories.db.bak4 'SELECT value, appeared_count FROM memories WHERE key=\"email\" ORDER BY appeared_count DESC LIMIT 1'"
+          source={`sqlite3 memories.db.bak4 'SELECT value, appeared_count FROM memories WHERE key="email" ORDER BY appeared_count DESC LIMIT 1'`}
         />
       </section>
 
