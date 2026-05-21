@@ -381,12 +381,18 @@ def _cli(argv: Optional[list[str]] = None) -> int:
 
     print(json.dumps(summary, indent=2))
     print(f"\nElapsed: {dt:.1f}s")
+    # The Swift caller scrapes the LAST line that contains both "cookies:" and
+    # "indexeddb:" for its UI summary (see SettingsPage.swift runBulkImport).
+    extras_suffix = ""
+    if summary.get("extra_dests"):
+        n_ok = sum(1 for x in summary["extra_dests"] if not x.get("errors"))
+        extras_suffix = f" Mirrored to {n_ok}/{len(summary['extra_dests'])} extra dest(s)."
     print(
         f"Cookies: {summary['cookies'].get('injected', 0)}/"
         f"{summary['cookies'].get('read', 0)}. "
         f"localStorage: {summary['localstorage'].get('files', 0)} files. "
         f"IndexedDB: {summary['indexeddb'].get('origins_copied', 0)} origins "
-        f"({summary['indexeddb'].get('bytes', 0) // (1024*1024)} MB)."
+        f"({summary['indexeddb'].get('bytes', 0) // (1024*1024)} MB).{extras_suffix}"
     )
     return 0 if not summary["errors"] else 2
 
