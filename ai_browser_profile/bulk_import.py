@@ -102,10 +102,14 @@ def _dest_profile_dir(bh_python: str, bh_server: str) -> Path:
 
 def _copy_localstorage(src_profile: Path, dst_profile: Path) -> tuple[int, int]:
     """Replace destination's Local Storage/leveldb with source's. Returns
-    (files_copied, bytes_copied). Chrome MUST be stopped first."""
+    (files_copied, bytes_copied). Chrome MUST be stopped first.
+
+    `src_profile` and `dst_profile` are profile directories
+    (i.e. `<user-data-dir>/Default`), not user-data-dir roots. Modern Chromium
+    stores Local Storage at `<profile>/Local Storage/leveldb`."""
     src_ls = src_profile / "Local Storage" / "leveldb"
     if not src_ls.exists():
-        log.warning("source has no Local Storage/leveldb")
+        log.warning("source has no Local Storage/leveldb at %s", src_ls)
         return 0, 0
     dst_ls = dst_profile / "Local Storage" / "leveldb"
     if dst_ls.exists():
@@ -122,10 +126,13 @@ def _copy_localstorage(src_profile: Path, dst_profile: Path) -> tuple[int, int]:
 def _copy_indexeddb(src_profile: Path, dst_profile: Path) -> tuple[int, int, int]:
     """Copy per-origin IndexedDB dirs from source to destination, skipping
     extension / localhost / partitioned / oversized. Returns
-    (origins_copied, origins_skipped, total_bytes). Chrome MUST be stopped."""
+    (origins_copied, origins_skipped, total_bytes). Chrome MUST be stopped.
+
+    `src_profile` and `dst_profile` are profile directories
+    (i.e. `<user-data-dir>/Default`), not user-data-dir roots."""
     src_idb = src_profile / "IndexedDB"
     if not src_idb.exists():
-        log.warning("source has no IndexedDB dir")
+        log.warning("source has no IndexedDB dir at %s", src_idb)
         return 0, 0, 0
     dst_idb = dst_profile / "IndexedDB"
     dst_idb.mkdir(parents=True, exist_ok=True)
@@ -223,19 +230,18 @@ def _mirror_to_extra_dest(bh_profile: Path, extra_profile: Path) -> dict:
     else:
         log.info("extra-dest cookies: no source Cookies at %s (skipping)", bh_cookies)
 
-    # LS — reuse helper to match exactly what the bh dest got. _copy_localstorage
-    # reads/writes <profile>/Local Storage/leveldb (root-level, matching the
-    # existing browser-harness flow).
+    # LS / IDB live under <user-data-dir>/Default. Pass profile-level paths
+    # (i.e. <bh_profile>/Default and <extra_profile>/Default) so the helper
+    # writes where Chrome actually reads.
     try:
-        ls_files, ls_bytes = _copy_localstorage(bh_profile, extra_profile)
+        ls_files, ls_bytes = _copy_localstorage(bh_default, extra_default)
         result["localstorage"] = {"files": ls_files, "bytes": ls_bytes}
     except Exception as e:
         log.warning("extra-dest localStorage copy failed: %s", e)
         result["errors"].append(f"localstorage: {e}")
 
-    # IDB — same reuse.
     try:
-        idb_copied, idb_skipped, idb_bytes = _copy_indexeddb(bh_profile, extra_profile)
+        idb_copied, idb_skipped, idb_bytes = _copy_indexeddb(bh_default, extra_default)
         result["indexeddb"] = {
             "origins_copied": idb_copied,
             "origins_skipped": idb_skipped,
@@ -304,16 +310,21 @@ def bulk_import(
     log.info("  stop_chrome -> %s", stopped.get("status"))
     time.sleep(1.0)  # give the OS a moment to release file locks
 
-    # Step 4: file-copy LocalStorage + IndexedDB
+    # Step 4: file-copy LocalStorage + IndexedDB. src_profile.path is already
+    # at profile level (e.g. ~/Library/.../Chrome/Default). dst_profile is at
+    # user-data-dir level (e.g. ~/.fazm/browser-harness/profile), so we join
+    # "Default" to descend into the profile dir Chrome actually uses.
+    dst_default = dst_profile / "Default"
+    dst_default.mkdir(parents=True, exist_ok=True)
     log.info("step 4/5: file-copy localStorage + IndexedDB")
     try:
-        ls_files, ls_bytes = _copy_localstorage(src_profile.path, dst_profile)
+        ls_files, ls_bytes = _copy_localstorage(src_profile.path, dst_default)
         summary["localstorage"] = {"files": ls_files, "bytes": ls_bytes}
     except Exception as e:
         log.warning("localStorage copy failed: %s", e)
         summary["errors"].append(f"localStorage: {e}")
     try:
-        idb_copied, idb_skipped, idb_bytes = _copy_indexeddb(src_profile.path, dst_profile)
+        idb_copied, idb_skipped, idb_bytes = _copy_indexeddb(src_profile.path, dst_default)
         summary["indexeddb"] = {
             "origins_copied": idb_copied,
             "origins_skipped": idb_skipped,
