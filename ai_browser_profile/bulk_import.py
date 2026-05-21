@@ -168,18 +168,108 @@ def _copy_indexeddb(src_profile: Path, dst_profile: Path) -> tuple[int, int, int
     return copied, skipped, total_bytes
 
 
+def _mirror_to_extra_dest(bh_profile: Path, extra_profile: Path) -> dict:
+    """Mirror cookies + LocalStorage + IndexedDB from the browser-harness destination
+    profile to an additional Chrome user-data-dir (e.g. ~/.assrt/managed-chrome).
+
+    Used when the host wants the same imported sessions available in a second
+    managed Chrome (assrt-mcp) without running the whole CDP-injection flow twice.
+
+    Pre-conditions:
+      * Both `bh_profile` (source of the mirror) and `extra_profile` (target) MUST
+        have Chrome stopped. The caller already stops bh's Chrome in step 3 of
+        the main flow; the extra profile is assumed not to be running. Any data
+        is replaced, not merged.
+      * Both profiles are managed Google Chrome instances on the same Mac, so
+        they share the same Safe Storage key. That's what makes copying the
+        encrypted Cookies SQLite file across them valid.
+    """
+    result: dict = {
+        "path": str(extra_profile),
+        "cookies_copied": False,
+        "localstorage": {"files": 0, "bytes": 0},
+        "indexeddb": {"origins_copied": 0, "origins_skipped": 0, "bytes": 0},
+        "errors": [],
+    }
+    try:
+        extra_profile.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        result["errors"].append(f"mkdir {extra_profile}: {e}")
+        return result
+
+    # Cookies live at <user_data_dir>/Default/Cookies (encrypted SQLite, plus
+    # optional -journal / -wal / -shm sidecars). Same Safe Storage key on this
+    # Mac means a straight file copy is portable between managed Chromes.
+    bh_default = bh_profile / "Default"
+    extra_default = extra_profile / "Default"
+    try:
+        extra_default.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        result["errors"].append(f"mkdir Default: {e}")
+    bh_cookies = bh_default / "Cookies"
+    if bh_cookies.exists():
+        try:
+            shutil.copy2(bh_cookies, extra_default / "Cookies")
+            for suffix in ("-journal", "-wal", "-shm"):
+                aux = bh_default / f"Cookies{suffix}"
+                if aux.exists():
+                    shutil.copy2(aux, extra_default / f"Cookies{suffix}")
+            result["cookies_copied"] = True
+            log.info("extra-dest cookies: %s -> %s",
+                     bh_cookies, extra_default / "Cookies")
+        except Exception as e:
+            log.warning("extra-dest cookies copy failed: %s", e)
+            result["errors"].append(f"cookies: {e}")
+    else:
+        log.info("extra-dest cookies: no source Cookies at %s (skipping)", bh_cookies)
+
+    # LS — reuse helper to match exactly what the bh dest got. _copy_localstorage
+    # reads/writes <profile>/Local Storage/leveldb (root-level, matching the
+    # existing browser-harness flow).
+    try:
+        ls_files, ls_bytes = _copy_localstorage(bh_profile, extra_profile)
+        result["localstorage"] = {"files": ls_files, "bytes": ls_bytes}
+    except Exception as e:
+        log.warning("extra-dest localStorage copy failed: %s", e)
+        result["errors"].append(f"localstorage: {e}")
+
+    # IDB — same reuse.
+    try:
+        idb_copied, idb_skipped, idb_bytes = _copy_indexeddb(bh_profile, extra_profile)
+        result["indexeddb"] = {
+            "origins_copied": idb_copied,
+            "origins_skipped": idb_skipped,
+            "bytes": idb_bytes,
+        }
+    except Exception as e:
+        log.warning("extra-dest IndexedDB copy failed: %s", e)
+        result["errors"].append(f"indexeddb: {e}")
+
+    return result
+
+
 def bulk_import(
     source_spec: str,
     bh_python: str,
     bh_server: str,
     cdp_url: str = "http://127.0.0.1:9655",
+    extra_dest_profiles: Optional[list[str]] = None,
 ) -> dict:
-    """End-to-end zero-tab import. Returns summary dict."""
+    """End-to-end zero-tab import. Returns summary dict.
+
+    `extra_dest_profiles` is an optional list of additional Chrome
+    `user-data-dir` paths to mirror cookies/LS/IDB into AFTER the
+    primary browser-harness import completes (and bh's Chrome is stopped).
+    Each path is treated as the user-data-dir root (Chrome creates a
+    `Default/` subfolder under it). Used by Fazm to keep assrt-mcp's
+    `~/.assrt/managed-chrome` profile in sync with browser-harness.
+    """
     summary: dict = {
         "source": source_spec,
         "cookies": {},
         "localstorage": {},
         "indexeddb": {},
+        "extra_dests": [],
         "errors": [],
     }
 
@@ -233,6 +323,24 @@ def bulk_import(
         log.warning("IndexedDB copy failed: %s", e)
         summary["errors"].append(f"indexeddb: {e}")
 
+    # Step 4.5 (optional): mirror cookies/LS/IDB from bh profile to extra dest
+    # profiles. Done BEFORE bh's Chrome restarts, so all the files we read are
+    # at rest (post-CDP-inject, pre-restart). The extra dests are themselves
+    # not running, so we can write into them freely.
+    if extra_dest_profiles:
+        log.info("step 4.5/5: mirror to %d extra dest profile(s)", len(extra_dest_profiles))
+        for raw_path in extra_dest_profiles:
+            extra = Path(raw_path).expanduser()
+            log.info("  -> %s", extra)
+            try:
+                mirrored = _mirror_to_extra_dest(dst_profile, extra)
+                summary["extra_dests"].append(mirrored)
+                for e in mirrored.get("errors", []):
+                    summary["errors"].append(f"extra_dest {extra}: {e}")
+            except Exception as e:
+                log.warning("extra-dest %s failed: %s", extra, e)
+                summary["errors"].append(f"extra_dest {extra}: {e}")
+
     # Step 5: restart dest Chrome
     log.info("step 5/5: restart destination Chrome")
     restarted = _run_bh(bh_python, bh_server, "ensure_chrome")
@@ -252,6 +360,10 @@ def _cli(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--bh-server", required=True,
                    help="path to browser-harness server.py")
     p.add_argument("--cdp-url", default="http://127.0.0.1:9655")
+    p.add_argument("--extra-dest-profile", dest="extra_dest_profiles",
+                   action="append", default=[],
+                   help="additional Chrome user-data-dir to mirror cookies/LS/IDB "
+                        "into (can repeat; e.g. ~/.assrt/managed-chrome)")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -261,7 +373,10 @@ def _cli(argv: Optional[list[str]] = None) -> int:
     )
 
     t0 = time.time()
-    summary = bulk_import(args.src, args.bh_python, args.bh_server, args.cdp_url)
+    summary = bulk_import(
+        args.src, args.bh_python, args.bh_server, args.cdp_url,
+        extra_dest_profiles=args.extra_dest_profiles,
+    )
     dt = time.time() - t0
 
     print(json.dumps(summary, indent=2))
